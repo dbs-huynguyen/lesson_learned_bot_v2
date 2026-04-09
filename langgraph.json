@@ -2,8 +2,7 @@
   "$schema": "https://langgra.ph/schema.json",
   "dependencies": ["."],
   "graphs": {
-    "chat": "./src/agent/chat_graph.py:graph",
-    "embedding": "./src/agent/embedding_graph.py:graph"
+    "chat": "./src/agent/chat_graph.py:graph"
   },
   "env": ".env",
   "image_distro": "wolfi"
