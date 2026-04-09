@@ -4,7 +4,6 @@ from typing import TypedDict
 
 import faiss
 import bm25s
-import Stemmer
 from langchain.embeddings import init_embeddings
 from langgraph.graph import END, START, StateGraph
 from langchain_community.vectorstores import FAISS, DistanceStrategy
