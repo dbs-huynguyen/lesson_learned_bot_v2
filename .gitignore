@@ -166,3 +166,4 @@ data/
 bm25_index/
 faiss_index/
 !src/lib/
+models/

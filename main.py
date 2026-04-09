@@ -1,56 +1,27 @@
-import streamlit as st
-import requests
-import uuid
+import asyncio
 
-API_URL = "http://localhost:2024/runs/stream"
+from langgraph_sdk import get_client
 
-st.title("🚀 LangGraph Streaming Chat")
+API_URL = "http://localhost:2024"
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+client = get_client(url=API_URL)
 
-if "thread_id" not in st.session_state:
-    st.session_state.thread_id = str(uuid.uuid4())
 
-# show history
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-# input
-if prompt := st.chat_input("Ask something..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    with st.chat_message("assistant"):
-        placeholder = st.empty()
-        full_text = ""
-
-        try:
-            with requests.post(
-                API_URL,
-                json={
-                    "assistant_id": "chat",
-                    "input": {
-                        "messages": st.session_state.messages,
-                    },
-                    "thread_id": st.session_state.thread_id,
+async def main():
+    async for chunk in client.runs.stream(
+        None,
+        "chat",
+        input={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is the capital of France?",
                 },
-                headers={"Content-Type": "application/json"},
-                stream=True,
-            ) as r:
-                for chunk in r.iter_content(chunk_size=1024):
-                    if chunk:
-                        token = chunk.decode("utf-8")
-                        full_text += token
-                        placeholder.markdown(full_text + "▌")
+            ]
+        },
+        stream_mode="messages",
+    ):
+        print(chunk.data)
 
-            placeholder.markdown(full_text)
 
-        except Exception as e:
-            full_text = f"❌ Error: {e}"
-            placeholder.markdown(full_text)
-
-    st.session_state.messages.append({"role": "assistant", "content": full_text})
+asyncio.run(main())

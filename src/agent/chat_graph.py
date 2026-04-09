@@ -5,6 +5,7 @@ import bm25s
 from langchain.chat_models import init_chat_model
 from langchain.embeddings import init_embeddings
 from langchain.messages import SystemMessage
+from langchain_community.tools import tool
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS, DistanceStrategy
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -18,7 +19,7 @@ class StateSchema(MessagesState):
 
 
 class GradeOutput(TypedDict):
-    binary_score: str
+    score: str
 
 
 llm = init_chat_model(
@@ -26,6 +27,7 @@ llm = init_chat_model(
     model_provider="ollama",
     base_url="http://192.168.88.179:11434",
     temperature=0,
+    reasoning=False,
 )
 
 embeddings = init_embeddings(
@@ -34,10 +36,10 @@ embeddings = init_embeddings(
     base_url="http://192.168.88.179:11434",
 )
 
-reranker = HuggingFaceCrossEncoder(
-    model_name="BAAI/bge-reranker-v2-m3",
-    model_kwargs={"device": "cpu"},
-)
+# reranker = HuggingFaceCrossEncoder(
+#     model_name="models/BAAI/bge-reranker-v2-m3",
+#     model_kwargs={"local_files_only": True, "device": "cuda"},
+# )
 
 
 def _vector_search(query: str) -> list[Document]:
@@ -76,13 +78,34 @@ def _keyword_search(query: str) -> list[Document]:
     return docs
 
 
-def route_query(state: StateSchema) -> StateSchema:
-    current_query = (
-        state["current_query"]
-        if state.get("current_query")
-        else state["messages"][-1].content
-    )
-    return StateSchema(current_query=current_query)
+@tool
+def _hybrid_search(query: str) -> str:
+    """Retrieve relevant lesson learned documents
+
+    Args:
+        query (str): The user's query
+
+    Returns:
+        str: A string containing the search results
+    """
+    return query
+
+
+def route_query(state: StateSchema) -> StateSchema | MessagesState:
+    llm_with_tools = llm.bind_tools([_hybrid_search])
+
+    system_prompt = """You are an assistant for a private knowledge base, your task is to determine whether a user's question can be answered directly or if it requires an information retrieval step"""
+    messages = [SystemMessage(content=system_prompt)] + state["messages"]
+    ai_response = llm_with_tools.invoke(messages)
+
+    if ai_response.tool_calls:
+        return StateSchema(current_query=state["messages"][-1].content)
+
+    return MessagesState(messages=state["messages"] + [ai_response])
+
+
+def search_condition(state: StateSchema) -> Literal["hybrid_search", "__end__"]:
+    return "hybrid_search" if "current_query" in state else END
 
 
 def hybrid_search(state: StateSchema) -> StateSchema:
@@ -96,14 +119,15 @@ def hybrid_search(state: StateSchema) -> StateSchema:
 
 
 def rerank_documents(state: StateSchema) -> StateSchema:
-    query = state["current_query"]
-    docs = state["documents"]
-    text_pairs = [(query, doc.page_content) for doc in docs]
-    scores = reranker.score(text_pairs)
-    reranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
-    top_docs = [doc for _, doc in reranked[:5]]
+    # query = state["current_query"]
+    # docs = state["documents"]
+    # text_pairs = [(query, doc.page_content) for doc in docs]
+    # scores = reranker.score(text_pairs)
+    # reranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+    # top_docs = [doc for _, doc in reranked[:5]]
 
-    return StateSchema(documents=top_docs)
+    # return StateSchema(documents=top_docs)
+    return state
 
 
 def grade_documents(state: StateSchema) -> StateSchema:
@@ -130,7 +154,7 @@ def grade_documents(state: StateSchema) -> StateSchema:
     llm_with_structured = llm.with_structured_output(GradeOutput)
     grade_output = llm_with_structured.invoke(prompt)
 
-    return StateSchema(grade=grade_output["binary_score"])
+    return StateSchema(grade=grade_output["score"])
 
 
 def docs_condition(state: StateSchema) -> Literal["generate_answer", "rewrite_query"]:
@@ -157,7 +181,7 @@ def rewrite_query(state: StateSchema) -> StateSchema:
     return StateSchema(current_query=ai_response.content)
 
 
-def generate_answer(state: StateSchema) -> StateSchema:
+def generate_answer(state: StateSchema) -> MessagesState:
     system_prompt = f"""You are a strict, citation-focused assistant for a private knowledge base
 
 **Context:**
@@ -174,12 +198,12 @@ def generate_answer(state: StateSchema) -> StateSchema:
     messages = [SystemMessage(content=system_prompt)] + state["messages"]
     ai_response = llm.invoke(messages)
 
-    return StateSchema(messages=[ai_response], current_query=None)
+    return MessagesState(messages=[ai_response], current_query=None)
 
 
 # Define the graph
 graph = (
-    StateGraph(StateSchema)
+    StateGraph(StateSchema, output_schema=MessagesState)
     # define nodes
     .add_node("route_query", route_query)
     .add_node("hybrid_search", hybrid_search)
@@ -189,12 +213,12 @@ graph = (
     .add_node("generate_answer", generate_answer)
     # define workflow
     .add_edge(START, "route_query")
-    .add_edge("route_query", "hybrid_search")
+    .add_conditional_edges("route_query", search_condition)
     .add_edge("hybrid_search", "rerank_documents")
     .add_edge("rerank_documents", "grade_documents")
     .add_conditional_edges("grade_documents", docs_condition)
-    .add_edge("rewrite_query", "route_query")
     .add_edge("generate_answer", END)
+    .add_edge("rewrite_query", "route_query")
     # compile the graph
     .compile()
 )
