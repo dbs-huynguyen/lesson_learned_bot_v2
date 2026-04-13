@@ -1,19 +1,48 @@
 import json
+import pprint
 import requests
 from typing import Any, Literal, TypedDict
 
 import bm25s
 from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
 from langchain.messages import AnyMessage, SystemMessage
-from langchain.chat_models import init_chat_model
 from langchain.embeddings import init_embeddings
 from langchain_community.tools import tool
 from langchain_community.vectorstores import FAISS, DistanceStrategy
+from langchain_ollama.chat_models import ChatOllama
 from langgraph.graph import END, MessagesState, StateGraph
 from langmem.short_term import SummarizationNode, RunningSummary
 
-from src.lib.cross_encoders import HuggingFaceCrossEncoder
 
+INITIAL_SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("placeholder", "{messages}"),
+        ("user", "Summarize the above conversation in Vietnamese:"),
+    ]
+)
+
+
+EXISTING_SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("placeholder", "{messages}"),
+        (
+            "user",
+            "This is summary of the conversation so far: {existing_summary}\n\n"
+            "Use Vietnamese to update and expand this summary based on the new messages above:",
+        ),
+    ]
+)
+
+
+FINAL_SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        # if exists
+        ("placeholder", "{system_message}"),
+        ("system", "{summary}"),
+        ("placeholder", "{messages}"),
+    ]
+)
 
 class StateSchema(MessagesState):
     summarized_messages: list[AnyMessage]
@@ -36,12 +65,13 @@ class GradeOutput(TypedDict):
     score: str
 
 
-llm = init_chat_model(
-    "qwen3.5:9b",
-    model_provider="ollama",
+llm = ChatOllama(
+    model="qwen3.5:9b",
     base_url="http://192.168.88.179:11434",
     temperature=0,
     reasoning=False,
+    num_predict=-2,
+    client_kwargs={"timeout": 30},
 )
 
 embeddings = init_embeddings(
@@ -49,14 +79,6 @@ embeddings = init_embeddings(
     provider="ollama",
     base_url="http://192.168.88.179:11434",
 )
-
-# reranker = HuggingFaceCrossEncoder(
-#     model_name="models/BAAI/bge-reranker-v2-m3",
-#     model_kwargs={
-#         "local_files_only": True,
-#         "device": "cuda",
-#     },
-# )
 
 
 def _vector_search(query: str) -> list[Document]:
@@ -111,23 +133,31 @@ def _hybrid_search(query: str) -> str:
 llm_with_tools = llm.bind_tools([_hybrid_search])
 
 summarization_node = SummarizationNode(
-    model=llm.bind(),
-    max_tokens=512,
-    max_summary_tokens=256,
+    model=llm,
+    max_tokens=256,
+    max_tokens_before_summary=128,
+    max_summary_tokens=128,
+    initial_summary_prompt=INITIAL_SUMMARY_PROMPT,
+    existing_summary_prompt=EXISTING_SUMMARY_PROMPT,
+    final_prompt=FINAL_SUMMARY_PROMPT,
 )
 
 
 def route_query(state: StateSchema) -> dict[str, Any]:
-    system_prompt = """
+    system_prompt = f"""
 You are an assistant for a private knowledge base focused on information technology, particularly software development.
+
+**Chat history:**
+{{summary}}
 
 **Instructions:**
 - You must use Vietnamese as the primary language in all responses.
+- If the request is a general conversation, respond directly. Otherwise, you must use the available search tool to retrieve relevant information before answering.
 - You must ensure the answer is concise, accurate, and strictly aligned with the provided context.
 - You must not fabricate, assume, or infer any information beyond what is explicitly supported by the provided context.
 - You must not use any external or web-based information.
-- If the request is a general conversation, respond directly. Otherwise, you must use the available search tool to retrieve relevant information before answering.
 - The answer must not include any information that is not explicitly supported by the provided context, even if it is commonly known.
+- The chat history above is for context only. You must not use it to answer questions about the referenced documents or rely on it in any way.
 - You should always include citations for the sources used at the end of your answer in bulleted list format.
 ```example
 **Citations:**
@@ -135,12 +165,18 @@ You are an assistant for a private knowledge base focused on information technol
 * [2] [filename:name_of_the_cited_document]
 ```
 """.strip()
-    messages = [SystemMessage(content=system_prompt)] + state["summarized_messages"]
+    if not isinstance(state["summarized_messages"][0], SystemMessage):
+        messages = [SystemMessage(content=system_prompt.format(summary=""))] + state["summarized_messages"]
+    else:
+        summary = state["summarized_messages"][0].content
+        pprint.pprint(system_prompt.format(summary=summary))
+        messages = [SystemMessage(content=system_prompt.format(summary=summary))] + state["summarized_messages"][1:]
+    # pprint.pprint(messages)
     ai_response = llm_with_tools.invoke(messages)
     if ai_response.tool_calls:
         return {"current_query": state["messages"][-1].content}
 
-    return {"messages": [ai_response]}
+    return {"messages": [ai_response], "documents": []}
 
 
 def search_condition(state: StateSchema) -> Literal["hybrid_search", "__end__"]:
@@ -157,18 +193,6 @@ def hybrid_search(state: StateSchema) -> dict[str, Any]:
     return {"documents": docs}
 
 
-# def rerank_documents(state: StateSchema) -> dict[str, Any]:
-#     query = state["current_query"]
-#     docs = state["documents"]
-#     text_pairs = [(query, doc.page_content) for doc in docs]
-#     scores = reranker.score(text_pairs)
-#     reranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
-#     top_docs = [doc for _, doc in reranked[:5]]
-
-#     return {"documents": top_docs}
-
-
-#TODO: pip install vllm | vllm serve BAAI/bge-reranker-v2-m3
 def rerank_documents(state: StateSchema) -> dict[str, Any]:
     query = state["current_query"]
     docs = state["documents"]
@@ -261,6 +285,9 @@ def generate_answer(state: StateSchema) -> dict[str, Any]:
     system_prompt = f"""
 You are an assistant for a private knowledge base focused on information technology, particularly software development.
 
+**Chat history:**
+{{summary}}
+
 **Context:**
 {"\n\n".join([f"""[{i}] [filename: {doc.metadata.get('source', 'Unknown')}]\n{doc.page_content}""" for i, doc in enumerate(state["documents"], 1)])}
 
@@ -272,6 +299,7 @@ You are an assistant for a private knowledge base focused on information technol
 - You must not use any external or web-based information.
 - If no relevant information is found in the provided context, you must respond with: "Nội dung này không có trong cơ sở kiến thức của tôi."
 - The answer must not include any information that is not explicitly supported by the provided context, even if it is commonly known.
+- The chat history above is for context only. You must not use it to answer questions about the referenced documents or rely on it in any way.
 - You should always include citations for the sources used at the end of your answer in bulleted list format.
 ```example
 **Citations:**
@@ -280,7 +308,13 @@ You are an assistant for a private knowledge base focused on information technol
 ```
 """.strip()
 
-    messages = [SystemMessage(content=system_prompt)] + state["summarized_messages"]
+    if not isinstance(state["summarized_messages"][0], SystemMessage):
+        messages = [SystemMessage(content=system_prompt.format(summary=""))] + state["summarized_messages"]
+    else:
+        summary = state["summarized_messages"][0].content
+        pprint.pprint(system_prompt.format(summary=summary))
+        messages = [SystemMessage(content=system_prompt.format(summary=summary))] + state["summarized_messages"][1:]
+    # pprint.pprint(messages)
     ai_response = llm.invoke(messages)
 
     return {"messages": [ai_response], "current_query": None}
@@ -291,7 +325,7 @@ graph = (
     StateGraph(
         state_schema=StateSchema,
         context_schema=ContextSchema,
-        output_schema=OutputSchema,
+        # output_schema=OutputSchema,
     )
     # define nodes
     .add_node("summarize", summarization_node)
