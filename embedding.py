@@ -37,6 +37,8 @@ parser = LessonsLearnedParser()
 def load_documents(input_dir: Path) -> dict[str, list]:
     file_paths: list[Path] = []
     documents = {"texts": [], "metadata": [], "ids": []}
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Input directory {input_dir} does not exist")
     for file_path in sorted(input_dir.glob(FILE_GLOB)):
         file_paths.append(file_path)
     for doc in parser.parser(file_paths):
