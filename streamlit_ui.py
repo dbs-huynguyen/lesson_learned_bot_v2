@@ -1,13 +1,14 @@
 import re
 import uuid
+from typing import Any, Generator
 
 import streamlit as st
 from langgraph_sdk import get_sync_client
 
+
 API_URL = "http://localhost:2024"
 
 client = get_sync_client(url=API_URL)
-
 
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
@@ -39,18 +40,10 @@ st.set_page_config(
 st.title("🤖 Kho Kinh Nghiệm Kỹ Thuật")
 
 
-def toggle_citations(idx, msg):
-
-    sources = {}
-    if msg["documents"]:
-        matches = re.findall(r'\[(\d+)\].*?filename:\s*.*?\]', msg["content"])
-        matches = [int(id) for id in matches]
-        sources = {k: v for k, v in msg["documents"].items() if k in matches}
-
-    
+def toggle_citations(idx, msg) -> None:
     if st.session_state.selected_source_idx != idx:
         st.session_state.selected_source_idx = idx
-        st.session_state.selected_sources = sources
+        st.session_state.selected_sources = msg["documents"]
         st.session_state.sidebar_state = "expanded"
         return
 
@@ -58,7 +51,7 @@ def toggle_citations(idx, msg):
         # Open
         if st.session_state.sidebar_state == "collapsed":
             st.session_state.sidebar_state = "expanded"
-            st.session_state.selected_sources = sources
+            st.session_state.selected_sources = msg["documents"]
         # Close
         else:
             st.session_state.sidebar_state = "collapsed"
@@ -76,7 +69,7 @@ for i, msg in enumerate(st.session_state.messages):
                 st.rerun()
 
 
-def reset_thread():
+def reset_thread() -> None:
     st.session_state.messages.clear()
     st.session_state.selected_sources = {}
     client.threads.delete(thread_id=st.session_state.thread_id)
@@ -88,7 +81,7 @@ def reset_thread():
         ttl={"strategy": "delete", "ttl": 1},
     )
 
-def stream_data(prompt):
+def stream_data(prompt) -> Generator[Any, Any, None]:
     for chunk in client.runs.stream(
         thread_id=st.session_state.thread_id,
         assistant_id="chat",
@@ -108,8 +101,13 @@ if prompt := st.chat_input("Nhập câu hỏi..."):
         with st.chat_message("ai"):
             answer = st.write_stream(stream_data(prompt), cursor="|")
 
+        matches = re.findall(r'\[(\d+)\].*?filename:\s*.*?\]', answer)
+        matches = [int(id) for id in matches]
+
         state = client.threads.get_state(thread_id=st.session_state.thread_id)
         documents = {i: item for i, item in enumerate(state["values"].get("documents", []), 1)}
+        documents = {k: v for k, v in documents.items() if k in matches}
+
     except Exception as e:
         answer = f"❌ Error: {e}"
         documents = {}
