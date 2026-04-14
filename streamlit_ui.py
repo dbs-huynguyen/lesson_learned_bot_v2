@@ -8,7 +8,8 @@ from langgraph_sdk import get_sync_client
 
 API_URL = "http://localhost:2024"
 
-client = get_sync_client(url=API_URL)
+client = get_sync_client(url=API_URL, timeout=30)
+
 
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
@@ -31,13 +32,17 @@ if "sidebar_state" not in st.session_state:
 if "selected_source_idx" not in st.session_state:
     st.session_state.selected_source_idx = None
 
+if "pending_prompt" not in st.session_state:
+    st.session_state.pending_prompt = None
+
+if "is_streaming" not in st.session_state:
+    st.session_state.is_streaming = False
+
 st.set_page_config(
     page_title="InsightBot – Bài Học & Kinh Nghiệm",
     page_icon="🤖",
     initial_sidebar_state=st.session_state.sidebar_state,
 )
-
-st.title("🤖 Kho Kinh Nghiệm Kỹ Thuật")
 
 
 def toggle_citations(idx, msg) -> None:
@@ -60,15 +65,6 @@ def toggle_citations(idx, msg) -> None:
         return
 
 
-for i, msg in enumerate(st.session_state.messages):
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-        if msg["role"] == "ai" and msg["documents"]:
-            if st.button("📚 Xem nguồn trích dẫn", key=f"src_{i}", on_click=toggle_citations, args=(i, msg)):
-                st.rerun()
-
-
 def reset_thread() -> None:
     st.session_state.messages.clear()
     st.session_state.selected_sources = {}
@@ -81,6 +77,7 @@ def reset_thread() -> None:
         ttl={"strategy": "delete", "ttl": 1},
     )
 
+
 def stream_data(prompt) -> Generator[Any, Any, None]:
     for chunk in client.runs.stream(
         thread_id=st.session_state.thread_id,
@@ -89,11 +86,57 @@ def stream_data(prompt) -> Generator[Any, Any, None]:
         stream_mode="messages-tuple",
     ):
         if chunk.event == "messages":
-            content = chunk.data[0].get("content", "")
+            message, metadata = chunk.data
+            tags = metadata.get("tags", [])
+            if "router" in tags:
+                continue
+            content = message.get("content", "")
             yield content
 
-if prompt := st.chat_input("Nhập câu hỏi..."):
+
+def repl_link(match, documents: dict[int, Any]) -> str:
+    link_mask = match.group(0)
+    urls: dict[str, tuple[str, str]] = {
+        k: tuple(v)
+        for doc in documents.values()
+        for k, v in doc.get("metadata", {}).get("urls", {}).items()
+    }
+    if link := urls.get(link_mask):
+        return "[{title}]({url})".format(title=link[0], url=link[1])
+    return ""
+
+
+st.title("🤖 Kho Kinh Nghiệm Kỹ Thuật")
+
+for i, msg in enumerate(st.session_state.messages):
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+        if msg["role"] == "ai" and msg["documents"]:
+            if st.button(
+                "Xem nguồn trích dẫn",
+                key=f"src_{i}",
+                on_click=toggle_citations,
+                type="tertiary",
+                icon=":material/document_search:",
+                args=(i, msg),
+            ):
+                st.rerun()
+
+prompt = st.chat_input("Nhập câu hỏi...", disabled=st.session_state.is_streaming)
+
+if prompt:
+    st.session_state.is_streaming = True
+    st.session_state.pending_prompt = prompt
+    st.rerun()
+
+if st.session_state.get("is_streaming") and st.session_state.get("pending_prompt"):
+    prompt = st.session_state.pending_prompt
+    st.session_state.pending_prompt = None
+
+    st.session_state.selected_sources = {}
     st.session_state.messages.append({"role": "human", "content": prompt})
+
     with st.chat_message("human"):
         st.markdown(prompt)
 
@@ -101,18 +144,26 @@ if prompt := st.chat_input("Nhập câu hỏi..."):
         with st.chat_message("ai"):
             answer = st.write_stream(stream_data(prompt), cursor="|")
 
-        matches = re.findall(r'\[(\d+)\].*?filename:\s*.*?\]', answer)
+        matches = re.findall(r'\[(\d+)\]\s*.*?filename:.*?\]', answer)
         matches = [int(id) for id in matches]
 
         state = client.threads.get_state(thread_id=st.session_state.thread_id)
         documents = {i: item for i, item in enumerate(state["values"].get("documents", []), 1)}
         documents = {k: v for k, v in documents.items() if k in matches}
+        answer = re.sub(r"#[a-zA-Z0-9_]+", lambda m: repl_link(m, documents), answer)
 
     except Exception as e:
         answer = f"❌ Error: {e}"
         documents = {}
 
-    st.session_state.messages.append({"role": "ai", "content": answer, "documents": documents})
+    st.session_state.messages.append(
+        {
+            "role": "ai",
+            "content": answer,
+            "documents": documents,
+        }
+    )
+    st.session_state.is_streaming = False
     st.rerun()
 
 with st.sidebar:
@@ -130,7 +181,7 @@ with st.sidebar:
         for i, src in st.session_state.selected_sources.items():
             metadata = src.get("metadata", {})
             page_content = src.get("page_content", "")
-            st.title(f"[{i}] {metadata.get('source', 'Unknown')}")
+            st.subheader(f"[{i}] {metadata.get('source', 'Unknown')}")
             st.markdown(f"{page_content}")
             st.divider()
     else:

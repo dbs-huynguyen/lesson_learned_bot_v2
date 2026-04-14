@@ -157,10 +157,7 @@ class LessonsLearnedParser:
                         continue
                     yield MyDocument(
                         id=str(uuid.uuid4()),
-                        text=(
-                            f"""{record["type"]}\n\n"""
-                            f"""{record["page_content"]}"""
-                        ),
+                        text=f"{record['type']}\n{record['page_content']}",
                         metadata=dict(
                             created_date=record["created_date"],
                             source=record["source"],
