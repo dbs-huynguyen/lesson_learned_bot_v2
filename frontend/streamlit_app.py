@@ -3,9 +3,9 @@ from uuid import uuid4
 from typing import Any
 
 import streamlit as st
-import streamlit.components.v1 as components
-from langgraph_sdk import get_sync_client
+from st_chat_message import message
 from st_checkbox_tree import checkbox_tree
+from langgraph_sdk import get_sync_client
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -99,11 +99,12 @@ with st.sidebar:
             <h2 style="font-size: 1.2rem;">Hướng dẫn sử dụng</h2>
             <ol style="padding-left: 0.5rem; color: #8e8ea0; font-size: 0.9rem;">
                 <li>Nhập câu hỏi hoặc yêu cầu của bạn vào ô chat bên dưới.</li>
-                <li>ChatDBS sẽ trả lời dựa trên kiến thức và ngữ cảnh đã được huấn luyện.</li>
-                <li>Bạn có thể hỏi về nhiều chủ đề khác nhau, từ khoa học, công nghệ đến giải trí.</li>
+                <li>ChatDBS sẽ trả lời dựa trên kiến thức được cung cấp.</li>
+                <li>Bạn có thể hỏi về chủ đề kinh nghiệm lập trình hoặc tài liệu ISO.</li>
                 <li>Để có câu trả lời tốt nhất, hãy cố gắng đặt câu hỏi rõ ràng và cụ thể.</li>
                 <li>Nếu muốn dừng phản hồi đang được tạo ra, hãy nhấn nút "Dừng tạo nội dung".</li>
             </ol>
+            <small style="padding-left: 0.5rem; color: #8e8ea0; font-size: 0.9rem;"><i>Lưu ý: ChatDBS có thể mắc lỗi. Hãy kiểm tra thông tin quan trọng.</i></small>
         </div>
         """,
         unsafe_allow_html=True,
@@ -169,6 +170,7 @@ for msg in st.session_state.messages:
         if msg["role"] == "assistant" and len(msg["documents"]) > 0:
             st.button(
                 "_Xem nguồn trích dẫn_",
+                key=msg["id"],
                 type="secondary",
                 icon=":material/document_search:",
                 on_click=toggle_citations,

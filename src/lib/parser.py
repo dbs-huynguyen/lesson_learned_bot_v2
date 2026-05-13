@@ -227,18 +227,18 @@ IGNORE_HD_FILES = [
 
 
 IGNORE_BHKN_FILES = [
-    "data/BHKN/AuthConsole_20231027.docx",
+    # "data/BHKN/AuthConsole_20231027.docx",
     # "data/BHKN/CDS_20250731.docx",
     # "data/BHKN/CDS_20250917.docx",
     # "data/BHKN/CDS_20260320.docx",
-    "data/BHKN/KonnichinoAI_20260304.docx",
-    "data/BHKN/Link_20250623.docx",
-    "data/BHKN/MonshinApp_20251223.docx",
+    # "data/BHKN/KonnichinoAI_20260304.docx",
+    # "data/BHKN/Link_20250623.docx",
+    # "data/BHKN/MonshinApp_20251223.docx",
     # "data/BHKN/Pass_20241030.docx",
     # "data/BHKN/Pass_20260119.docx",
-    "data/BHKN/Pass_20260122.docx",
-    "data/BHKN/Pivot_20241021.docx",
-    "data/BHKN/PreMonshinApp_20250716.docx",
+    # "data/BHKN/Pass_20260122.docx",
+    # "data/BHKN/Pivot_20241021.docx",
+    # "data/BHKN/PreMonshinApp_20250716.docx",
 ]
 
 class BaseParser:
@@ -367,7 +367,7 @@ class LessonsLearnedParser(BaseParser):
             client_kwargs={"timeout": 120},
             temperature=0.7,
             reasoning=False,
-            num_ctx=4096,
+            num_ctx=32000,
             num_predict=1024,
             seed=9999,
         )
@@ -379,16 +379,6 @@ class LessonsLearnedParser(BaseParser):
     @property
     def allow_ext(self) -> set[str]:
         return {".docx", ".doc"}
-
-    def _get_title(self, file_path: Path) -> str:
-        docx = docx2python(file_path, duplicate_merged_cells=False)
-        return "".join(
-            [
-                "".join([ele.strip().replace("\n", " ") for ele in p.run_strings])
-                for p in iter_paragraphs(docx.header_pars)
-                if p.style == "Title"
-            ]
-        ).upper()
 
     def _get_body(self, file_path: Path) -> tuple[str, str | None]:
         docx = docx2python(file_path, duplicate_merged_cells=False)
@@ -453,7 +443,7 @@ class LessonsLearnedParser(BaseParser):
             elif p.style == "OccurredDate":
                 matched = re.match(r".+(\d{2})\/(\d{2})\/(\d{4})", p.run_strings[0].replace(" ", ""))
                 if matched and len(matched.groups()) == 3:
-                    occurred_at = datetime.datetime(*map(int, matched.groups()[::-1])).isoformat()
+                    occurred_at = datetime.datetime(*map(int, matched.groups()[::-1])).strftime("%Y-%m-%d")
 
             text = " ".join([ele for ele in p.run_strings if validate_text(ele)]).strip()
 
@@ -487,6 +477,11 @@ class LessonsLearnedParser(BaseParser):
         summary = self._summarize_content(body_text)
         # print(summary)
 
+        matched = re.match(r"^([a-zA-Z0-9]+)", file_path.stem)
+        if not matched:
+            raise ValueError(f"File name does not match expected pattern: <project_name>_yyyymmdd, got {file_path.name}")
+        project_name = matched.group(1).lower()
+
         extractor = MarkdownExtractor(summary)
         
         docs: list[MyDocument] = []
@@ -503,6 +498,7 @@ class LessonsLearnedParser(BaseParser):
                         section=section,
                         doc_type="BHKN",
                         occurred_at=occurred_at,
+                        project_name=project_name,
                     ),
                 )
             )

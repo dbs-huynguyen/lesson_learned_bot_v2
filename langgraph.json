@@ -6,5 +6,10 @@
     "list_files": "./src/agent/list_files_graph.py:graph"
   },
   "env": ".env",
-  "image_distro": "wolfi"
+  "image_distro": "wolfi",
+  "checkpointer": {
+    "serde": {
+      "allowed_json_modules": true
+    }
+  }
 }

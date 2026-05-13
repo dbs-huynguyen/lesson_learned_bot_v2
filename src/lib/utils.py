@@ -1,11 +1,9 @@
-import os
 import re
-import pickle
 import unicodedata
 from enum import Enum
+from typing import Any
 
-from rank_bm25 import BM25Okapi
-from langchain_community.retrievers import BM25Retriever
+import dateparser
 
 
 VIETNAMESE_MAP = {
@@ -202,3 +200,16 @@ def clean_text(s: str) -> str:
         elif re.search(r"^Ngày", s):
             s = re.sub(r"\s+", " ", s)
     return s
+
+
+def canonicalize_value(name: Any) -> Any:
+    if isinstance(name, str):
+        return re.sub(r"[^a-zA-Z0-9]", "", name.lower())
+    return name
+
+
+def canonicalize_date(value: str) -> str:
+    value = dateparser.parse(value)
+    if value is not None:
+        value = value.strftime("%Y-%m-%d")
+    return value

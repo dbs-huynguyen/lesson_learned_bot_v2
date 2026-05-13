@@ -32,7 +32,6 @@ from langgraph.types import Command
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import InMemorySaver
 
-
 load_dotenv()
 
 
@@ -148,7 +147,7 @@ def run_query(state: MessagesState) -> dict:
 
     tool_call = tool_call_message.tool_calls[0]
     tool_message = run_query_tool.invoke(tool_call)
-    response = model.invoke(state["messages"] + [tool_message])
+    response = model.bind(think=True).invoke(state["messages"] + [tool_message])
 
     return {"messages": [tool_message, response]}
 
@@ -170,13 +169,16 @@ workflow = (
 )
 
 import pprint
+
 if __name__ == "__main__":
     question = "Which genre on average has the longest tracks?"
 
-    for step in workflow.stream(
-        {"messages": [HumanMessage(question)]}, stream_mode="values"
+    for chunk in workflow.stream(
+        {"messages": [HumanMessage(question)]},
+        stream_mode="messages",
+        version="v2",
     ):
-        if "messages" in step:
-            for msg in step["messages"]:
-                msg.pretty_print()
-        print("+" * 50)
+        if chunk["type"] == "messages":
+            message_chunk, metadata = chunk["data"]
+            if message_chunk.content:
+                print(message_chunk.content, end="|", flush=True)
