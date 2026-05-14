@@ -8,38 +8,35 @@ from langchain_classic.retrievers.contextual_compression import (
 )
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, DatetimeRange
-from langchain_qdrant import QdrantVectorStore, RetrievalMode, FastEmbedSparse
 
 from src.lib.reranker import MyReranker
 
 load_dotenv()
 
 
-QDRANT_INDEX_DIR = os.getenv("QDRANT_INDEX_DIR", "qdrant_index")
-
-
-embeddings = OpenAIEmbeddings(
-    model=os.getenv("EMBEDDING_MODEL"),
-    base_url=os.getenv("EMBEDDING_BASE_URL"),
-)
-client = QdrantClient(path=QDRANT_INDEX_DIR)
-qdrant_store = QdrantVectorStore(
-    client=client,
-    collection_name="bhkn",
-    embedding=embeddings,
-    vector_name="dense",
-    sparse_embedding=FastEmbedSparse(),
-    sparse_vector_name="sparse",
-    retrieval_mode=RetrievalMode.HYBRID,
-)
-reranker = MyReranker(
-    base_url=os.getenv("RERANKER_BASE_URL"),
-    model=os.getenv("RERANKER_MODEL"),
-    top_n=10,
-)
-
-
 def main():
+    from langchain_qdrant import QdrantVectorStore, RetrievalMode, FastEmbedSparse
+    embeddings = OpenAIEmbeddings(
+        model=os.getenv("EMBEDDING_MODEL"),
+        base_url=os.getenv("EMBEDDING_BASE_URL"),
+    )
+    client = QdrantClient(
+        url=os.getenv("QDRANT_URL"),
+    )
+    qdrant_store = QdrantVectorStore(
+        client=client,
+        collection_name="bhkn",
+        embedding=embeddings,
+        vector_name="dense",
+        sparse_embedding=FastEmbedSparse(),
+        sparse_vector_name="sparse",
+        retrieval_mode=RetrievalMode.HYBRID,
+    )
+    reranker = MyReranker(
+        base_url=os.getenv("RERANKER_BASE_URL"),
+        model=os.getenv("RERANKER_MODEL"),
+        top_n=10,
+    )
     # print(qdrant_store.client.get_collection("bhkn"))
     compression_retriever = ContextualCompressionRetriever(
         base_retriever=qdrant_store.as_retriever(

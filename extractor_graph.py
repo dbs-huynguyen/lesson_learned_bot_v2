@@ -10,14 +10,16 @@ from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
 from langchain_openai import OpenAIEmbeddings
-from langchain_qdrant import QdrantVectorStore, RetrievalMode, FastEmbedSparse
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
     Distance,
     VectorParams,
     SparseVectorParams,
+    SparseIndexParams,
     PayloadSchemaType,
     Modifier,
+    KeywordIndexParams,
+    DatetimeIndexParams,
     MultiVectorConfig,
     MultiVectorComparator,
     HnswConfigDiff,
@@ -50,52 +52,6 @@ load_dotenv()
 setup_logging()
 logger = logging.getLogger(__name__)
 
-QDRANT_INDEX_DIR = os.getenv("QDRANT_INDEX_DIR", "qdrant_index")
-
-
-embeddings = OpenAIEmbeddings(
-    model=os.getenv("EMBEDDING_MODEL"),
-    base_url=os.getenv("EMBEDDING_BASE_URL"),
-)
-d = len(embeddings.embed_query("hello world"))
-client = QdrantClient(path=QDRANT_INDEX_DIR)
-if "bhkn" in [collection.name for collection in client.get_collections().collections]:
-    client.delete_collection(collection_name="bhkn")
-client.create_collection(
-    collection_name="bhkn",
-    vectors_config={
-        "dense": VectorParams(
-            size=1024,
-            distance=Distance.COSINE,
-        ),
-        # "multi": VectorParams(
-        #     size=96,
-        #     distance=Distance.COSINE,
-        #     multivector_config=MultiVectorConfig(
-        #         comparator=MultiVectorComparator.MAX_SIM,
-        #     ),
-        #     hnsw_config=HnswConfigDiff(m=0),  #  Disable HNSW for reranking
-        # ),
-    },
-    sparse_vectors_config={
-        "sparse": SparseVectorParams(modifier=Modifier.IDF),
-    },
-)
-client.create_payload_index(
-    collection_name="bhkn",
-    field_name="doc_type",
-    field_schema=PayloadSchemaType.KEYWORD,
-)
-qdrant_store = QdrantVectorStore(
-    client=client,
-    collection_name="bhkn",
-    embedding=embeddings,
-    vector_name="dense",
-    sparse_embedding=FastEmbedSparse(),
-    sparse_vector_name="sparse",
-    retrieval_mode=RetrievalMode.HYBRID,
-)
-
 
 def embed(documents: list[MyDocument]) -> None:
     logger.info(
@@ -106,6 +62,69 @@ def embed(documents: list[MyDocument]) -> None:
             },
             ensure_ascii=False,
         )
+    )
+    from langchain_qdrant import QdrantVectorStore, RetrievalMode, FastEmbedSparse
+
+    embeddings = OpenAIEmbeddings(
+        model=os.getenv("EMBEDDING_MODEL"),
+        base_url=os.getenv("EMBEDDING_BASE_URL"),
+    )
+    d = len(embeddings.embed_query("hello world"))
+    client = QdrantClient(url=os.getenv("QDRANT_URL"))
+    if "bhkn" in [
+        collection.name for collection in client.get_collections().collections
+    ]:
+        client.delete_collection(collection_name="bhkn")
+    client.create_collection(
+        collection_name="bhkn",
+        vectors_config={
+            "dense": VectorParams(
+                size=1024,
+                distance=Distance.COSINE,
+            ),
+            # "multi": VectorParams(
+            #     size=96,
+            #     distance=Distance.COSINE,
+            #     multivector_config=MultiVectorConfig(
+            #         comparator=MultiVectorComparator.MAX_SIM,
+            #     ),
+            #     hnsw_config=HnswConfigDiff(m=0),  #  Disable HNSW for reranking
+            # ),
+        },
+        sparse_vectors_config={
+            "sparse": SparseVectorParams(
+                index=SparseIndexParams(on_disk=False),
+                modifier=Modifier.IDF,
+            ),
+        },
+    )
+    client.create_payload_index(
+        collection_name="bhkn",
+        field_name="project_name",
+        field_schema=KeywordIndexParams(
+            type=PayloadSchemaType.KEYWORD,
+            on_disk=False,
+            enable_hnsw=False,
+        ),
+    )
+    client.create_payload_index(
+        collection_name="bhkn",
+        field_name="occurred_at",
+        field_schema=DatetimeIndexParams(
+            type=PayloadSchemaType.DATETIME,
+            on_disk=False,
+            enable_hnsw=False,
+        ),
+    )
+
+    qdrant_store = QdrantVectorStore(
+        client=client,
+        collection_name="bhkn",
+        embedding=embeddings,
+        vector_name="dense",
+        sparse_embedding=FastEmbedSparse(),
+        sparse_vector_name="sparse",
+        retrieval_mode=RetrievalMode.HYBRID,
     )
     try:
         qdrant_store.add_documents(documents)

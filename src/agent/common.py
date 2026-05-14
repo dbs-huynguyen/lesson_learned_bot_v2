@@ -13,17 +13,7 @@ from qdrant_client.http.models import (
     DatetimeRange,
 )
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.messages import SystemMessage
-from langchain.agents import create_agent
-from langchain.agents.middleware import (
-    SummarizationMiddleware,
-    AgentMiddleware,
-    AgentMiddleware,
-    ModelRequest,
-    ModelResponse,
-)
 from langchain_openai import OpenAIEmbeddings
-from langchain_qdrant import QdrantVectorStore, RetrievalMode, FastEmbedSparse
 from langchain_ollama import ChatOllama
 
 from src.lib.reranker import MyReranker
@@ -133,12 +123,18 @@ class ExtractionDatetime(BaseModel):
 
 @lru_cache
 def get_qdrant_store():
+    # Lazy import to avoid slow PyTorch loading at module import time
+    from langchain_qdrant import FastEmbedSparse, QdrantVectorStore, RetrievalMode
+    
     embeddings = OpenAIEmbeddings(
         model=os.getenv("EMBEDDING_MODEL"),
         base_url=os.getenv("EMBEDDING_BASE_URL"),
     )
 
-    client = QdrantClient(path=os.getenv("QDRANT_INDEX_DIR"))
+    client = QdrantClient(
+        url=os.getenv("QDRANT_URL"),
+        # path=os.getenv("QDRANT_INDEX_DIR"),
+    )
 
     return QdrantVectorStore(
         client=client,
@@ -160,20 +156,29 @@ def get_reranker(top_n: int = 10):
     )
 
 
-class DynamicContextMiddleware(AgentMiddleware):
-    def wrap_model_call(
-        self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]
-    ) -> ModelResponse:
-        ctx = request.runtime.context or {}
-        dynamic_context = ctx.get("context", "")
-        base_content = list(request.system_message.content_blocks or [])
-        new_content = base_content + [{"type": "text", "text": dynamic_context}]
-        new_system_message = SystemMessage(content=new_content)
-        return handler(request.override(system_message=new_system_message))
-
-
 @lru_cache
 def get_answer_agent(agent_type: AgentType):
+    # Lazy import to avoid slow loading at module import time
+    from langchain.messages import SystemMessage
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import (
+        SummarizationMiddleware,
+        AgentMiddleware,
+        ModelRequest,
+        ModelResponse,
+    )
+
+    class DynamicContextMiddleware(AgentMiddleware):
+        def wrap_model_call(
+            self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]
+        ) -> ModelResponse:
+            ctx = request.runtime.context or {}
+            dynamic_context = ctx.get("context", "")
+            base_content = list(request.system_message.content_blocks or [])
+            new_content = base_content + [{"type": "text", "text": dynamic_context}]
+            new_system_message = SystemMessage(content=new_content)
+            return handler(request.override(system_message=new_system_message))
+
     return create_agent(
         ChatOllama(
             model=os.getenv("OLLAMA_LLM_MODEL"),
