@@ -13,12 +13,15 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "langchain>=1.2.15",
     "langchain-ollama>=1.1.0",
+    "langchain-openai>=1.1.12",
     "langchain-community>=0.4.1",
-    "qdrant_client>=1.17.1",
+    "langchain-qdrant>=1.1.0",
+    "qdrant-client>=1.17.1",
+    "fastembed>=0.8.0",
     "dateparser>=1.4.0",
     "docx2python>=3.6.2",
     "streamlit>=1.56.0",
-    "st_checkbox_tree>=1.0.2",
+    "st-checkbox-tree>=1.0.2",
 ]
 
 
