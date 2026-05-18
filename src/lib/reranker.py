@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class MyReranker(BaseDocumentCompressor):
     base_url: str | URL
     model: str
-    top_n: Optional[int] = None
+    # top_n: Optional[int] = None
     timeout: int = 30
     path: str | URL = "score"
 
@@ -79,12 +79,12 @@ class MyReranker(BaseDocumentCompressor):
 
             scored_docs.sort(key=lambda x: x[1], reverse=True)
 
-            if self.top_n:
-                scored_docs = scored_docs[: self.top_n]
+            # if self.top_n:
+            #     scored_docs = scored_docs[: self.top_n]
 
             return [doc for doc, _ in scored_docs]
         except requests.RequestException as e:
             logger.error("Error occurred while calling the API: %s", e)
-            if self.top_n:
-                return documents[: self.top_n]
+            # if self.top_n:
+            #     return documents[: self.top_n]
             return documents

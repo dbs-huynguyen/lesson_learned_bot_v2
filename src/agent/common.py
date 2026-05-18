@@ -12,12 +12,25 @@ from qdrant_client.http.models import (
     MatchAny,
     DatetimeRange,
 )
+from langchain.messages import SystemMessage
+from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
+from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.rate_limiters import InMemoryRateLimiter
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_openai import OpenAIEmbeddings
 from langchain_ollama import ChatOllama
 
 from src.lib.reranker import MyReranker
-from src.lib.prompts import BASIC_AGENT_SYSTEM_PROMPT
+from src.lib.prompts import (
+    BASIC_AGENT_SYSTEM_PROMPT,
+    ROUTE_QUERY_PROMPT,
+    EXTRACT_KEYWORD_PROMPT,
+    EXTRACT_DATE_PROMPT,
+    RETRIEVAL_DECISION_PROMPT,
+)
 from src.lib.utils import canonicalize_value, canonicalize_date
 
 SYSTEM_PROMPT_REGISTRY: dict[str, ChatPromptTemplate] = {
@@ -82,6 +95,7 @@ class ProjectName(str, Enum):
     SIGN = "sign"
     CONTRACT = "contract"
     LINK = "link"
+    PIVOT = "pivot"
     CDS = "cds"
     MONSHIN_APP = "monshinapp"
     PREMONSHIN_APP = "premonshinapp"
@@ -101,7 +115,7 @@ class ExtractionKeyword(BaseModel):
         return self
 
 
-class ExtractionDatetime(BaseModel):
+class ExtractionDate(BaseModel):
     occurred_at: Optional[RangeFilter[str]] = Field(
         default=None,
         description="The datetime mentioned in the query. Can be a specific point in time or a range.",
@@ -121,20 +135,17 @@ class ExtractionDatetime(BaseModel):
         return self
 
 
-@lru_cache
+@lru_cache(maxsize=1)
 def get_qdrant_store():
     # Lazy import to avoid slow PyTorch loading at module import time
     from langchain_qdrant import FastEmbedSparse, QdrantVectorStore, RetrievalMode
-    
+
     embeddings = OpenAIEmbeddings(
         model=os.getenv("EMBEDDING_MODEL"),
         base_url=os.getenv("EMBEDDING_BASE_URL"),
     )
 
-    client = QdrantClient(
-        url=os.getenv("QDRANT_URL"),
-        # path=os.getenv("QDRANT_INDEX_DIR"),
-    )
+    client = QdrantClient(url=os.getenv("QDRANT_URL"))
 
     return QdrantVectorStore(
         client=client,
@@ -147,30 +158,46 @@ def get_qdrant_store():
     )
 
 
-@lru_cache
-def get_reranker(top_n: int = 10):
+@lru_cache(maxsize=1)
+def get_reranker():
     return MyReranker(
         base_url=os.getenv("RERANKER_BASE_URL"),
         model=os.getenv("RERANKER_MODEL"),
-        top_n=top_n,
+        timeout=120,
     )
 
 
-@lru_cache
-def get_answer_agent(agent_type: AgentType):
+rate_limiter = InMemoryRateLimiter(
+    requests_per_second=0.1,  # <-- Can only make a request once every 10 seconds!!
+    check_every_n_seconds=0.1,  # Wake up every 100 ms to check whether allowed to make a request,
+    max_bucket_size=20,  # Controls the maximum burst size.
+)
+
+
+def get_base_llm(**kwargs):
+    base_ollama_config = dict(
+        model=os.getenv("OLLAMA_LLM_MODEL"),
+        base_url=os.getenv("OLLAMA_BASE_URL"),
+        client_kwargs={"timeout": 120},
+        keep_alive="1h",
+        rate_limiter=rate_limiter,
+        seed=9999,
+        num_ctx=32000,
+        reasoning=False,
+    )
+    return ChatOllama(**base_ollama_config, **kwargs)
+
+
+@lru_cache(maxsize=1)
+def answer_agent(agent_type: AgentType):
     # Lazy import to avoid slow loading at module import time
-    from langchain.messages import SystemMessage
-    from langchain.agents import create_agent
-    from langchain.agents.middleware import (
-        SummarizationMiddleware,
-        AgentMiddleware,
-        ModelRequest,
-        ModelResponse,
-    )
+    from langchain.agents.middleware import SummarizationMiddleware
 
     class DynamicContextMiddleware(AgentMiddleware):
         def wrap_model_call(
-            self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]
+            self,
+            request: ModelRequest,
+            handler: Callable[[ModelRequest], ModelResponse],
         ) -> ModelResponse:
             ctx = request.runtime.context or {}
             dynamic_context = ctx.get("context", "")
@@ -180,87 +207,94 @@ def get_answer_agent(agent_type: AgentType):
             return handler(request.override(system_message=new_system_message))
 
     return create_agent(
-        ChatOllama(
-            model=os.getenv("OLLAMA_LLM_MODEL"),
-            base_url=os.getenv("OLLAMA_BASE_URL"),
-            client_kwargs={"timeout": 120},
-            seed=9999,
-            num_ctx=32000,
-            reasoning=False,
-            num_predict=-2,
-            temperature=0.2,
-            top_p=0.9,
-        ),
+        get_base_llm(num_predict=-2, temperature=0.0, top_p=0.9),
         system_prompt=SYSTEM_PROMPT_REGISTRY[agent_type.value].format(),
         middleware=[
             DynamicContextMiddleware(),
             SummarizationMiddleware(
-                model=ChatOllama(
-                    model=os.getenv("OLLAMA_LLM_MODEL"),
-                    base_url=os.getenv("OLLAMA_BASE_URL"),
-                    client_kwargs={"timeout": 120},
-                    seed=9999,
-                    num_ctx=32000,
-                    reasoning=False,
-                    num_predict=1024,
+                get_base_llm(
+                    num_predict=-2,
                     temperature=0.3,
                     top_p=0.9,
                     tags=["nostream"],
                 ),
-                trigger=[("tokens", 6000), ("messages", 8)],
-                keep=("messages", 4),
+                trigger=[("messages", 4)],
+                keep=("messages", 1),
             ),
         ],
         name=f"answer_{agent_type.value}",
     )
 
 
-@lru_cache
-def get_llm_classification():
-    return ChatOllama(
-        model=os.getenv("OLLAMA_LLM_MODEL"),
-        base_url=os.getenv("OLLAMA_BASE_URL"),
-        client_kwargs={"timeout": 120},
-        seed=9999,
-        num_ctx=32000,
-        reasoning=False,
+@lru_cache(maxsize=1)
+def task_classification_agent():
+    return (
+        {
+            "schema": lambda x: AgentClassification.model_json_schema(),
+            "query": RunnablePassthrough(),
+        }
+        | ROUTE_QUERY_PROMPT
+        | get_base_llm(
+            num_predict=256,
+            temperature=0.0,
+            top_p=0.9,
+            tags=["nostream"],
+        ).with_structured_output(
+            AgentClassification,
+            include_raw=True,
+        )
+    )
+
+
+@lru_cache(maxsize=1)
+def decision_making_agent():
+    return RETRIEVAL_DECISION_PROMPT | get_base_llm(
         num_predict=256,
         temperature=0.0,
         top_p=0.9,
         tags=["nostream"],
-    ).with_structured_output(AgentClassification, include_raw=True)
+    )
 
 
-@lru_cache
-def llm_extract_keyword():
-    return ChatOllama(
-        model=os.getenv("OLLAMA_LLM_MODEL"),
-        base_url=os.getenv("OLLAMA_BASE_URL"),
-        client_kwargs={"timeout": 120},
-        seed=9999,
-        num_ctx=32000,
-        reasoning=False,
-        num_predict=256,
-        temperature=0.0,
-        top_p=0.9,
-        tags=["nostream"],
-    ).with_structured_output(ExtractionKeyword, include_raw=True)
+@lru_cache(maxsize=1)
+def keyword_extraction_agent():
+    return (
+        dict(
+            schema=lambda x: ExtractionKeyword.model_json_schema(),
+            query=RunnablePassthrough(),
+        )
+        | EXTRACT_KEYWORD_PROMPT
+        | get_base_llm(
+            num_predict=256,
+            temperature=0.0,
+            top_p=0.9,
+            tags=["nostream"],
+        ).with_structured_output(
+            ExtractionKeyword,
+            include_raw=True,
+        )
+    )
 
 
-@lru_cache
-def llm_extract_datetime():
-    return ChatOllama(
-        model=os.getenv("OLLAMA_LLM_MODEL"),
-        base_url=os.getenv("OLLAMA_BASE_URL"),
-        client_kwargs={"timeout": 120},
-        seed=9999,
-        num_ctx=32000,
-        reasoning=False,
-        num_predict=256,
-        temperature=0.0,
-        top_p=0.9,
-        tags=["nostream"],
-    ).with_structured_output(ExtractionDatetime, include_raw=True)
+@lru_cache(maxsize=1)
+def date_extraction_agent():
+    return (
+        dict(
+            schema=lambda x: ExtractionDate.model_json_schema(),
+            now=RunnablePassthrough(),
+            query=RunnablePassthrough(),
+        )
+        | EXTRACT_DATE_PROMPT
+        | get_base_llm(
+            num_predict=256,
+            temperature=0.0,
+            top_p=0.9,
+            tags=["nostream"],
+        ).with_structured_output(
+            ExtractionDate,
+            include_raw=True,
+        )
+    )
 
 
 def build_field_condition(
@@ -316,3 +350,14 @@ def to_qdrant_filter(metadata_filter: MetadataFilter) -> Filter:
     return Filter(
         must=build_conditions(metadata_filter.must),
     )
+
+
+def merge_documents(
+    left: Optional[dict[str, Document]], right: Optional[dict[str, Document]]
+) -> Optional[dict[str, Document]]:
+    """Merge two document dictionaries, with right taking precedence."""
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return {**left, **right}

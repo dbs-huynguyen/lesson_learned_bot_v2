@@ -1,8 +1,10 @@
 import re
 from uuid import uuid4
 from typing import Any
+from html import escape
 
 import streamlit as st
+from streamlit import components
 from st_checkbox_tree import checkbox_tree
 from langgraph_sdk import get_sync_client
 
@@ -40,6 +42,9 @@ if "document_types" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+if "documents" not in st.session_state:
+    st.session_state.documents = {}
+
 if "selected_sources" not in st.session_state:
     st.session_state.selected_sources = []
 
@@ -65,7 +70,11 @@ if "run_id" not in st.session_state:
 def toggle_citations(msg) -> None:
     if st.session_state.selected_source_idx != msg["id"]:
         st.session_state.selected_source_idx = msg["id"]
-        st.session_state.selected_sources = msg["documents"]
+        st.session_state.selected_sources = [
+            st.session_state.documents[src]
+            for src in msg["sources"]
+            if src in st.session_state.documents
+        ]
         st.session_state.sidebar_state = "expanded"
         return
 
@@ -73,7 +82,11 @@ def toggle_citations(msg) -> None:
         # Open
         if st.session_state.sidebar_state == "collapsed":
             st.session_state.sidebar_state = "expanded"
-            st.session_state.selected_sources = msg["documents"]
+            st.session_state.selected_sources = [
+                st.session_state.documents[src]
+                for src in msg["sources"]
+                if src in st.session_state.documents
+            ]
         # Close
         else:
             st.session_state.sidebar_state = "collapsed"
@@ -85,11 +98,69 @@ def toggle_citations(msg) -> None:
 def repl_citation(match, sources: list[str]) -> str:
     for i, src in enumerate(sources, 1):
         if match.group(2) == src:
-            return f"[[{i}]]({src})"
-    return f"[[?]]({src})"
+            return f'<a href="#" data-link="{src}">[{i}]</a>'
+            # return f"[[{i}]]({src})"
+    return f'<a href="#" data-link="{src}">[?]</a>'
+    # return f"[[?]]({src})"
 
 
 st.title("ChatDBS", text_alignment="center")
+
+
+inline_links = st.components.v2.component(
+    "inline_links",
+    js="""
+    export default function(component) {
+        const { setTriggerValue } = component;
+        
+        // Use MutationObserver to watch for dynamically added links
+        const observer = new MutationObserver(() => {
+            const links = document.querySelectorAll('a[href="#"][data-link]');
+            links.forEach((link) => {
+                if (!link.dataset.listenerAttached) {
+                    link.dataset.listenerAttached = 'true';
+                    link.onclick = (e) => {
+                        e.preventDefault();
+                        const source = link.dataset.link;
+                        setTriggerValue('clicked', source);
+                    };
+                }
+            });
+        });
+        
+        observer.observe(document.body, { childList: true, subtree: true });
+        
+        // Initial scan
+        const links = document.querySelectorAll('a[href="#"][data-link]');
+        links.forEach((link) => {
+            link.dataset.listenerAttached = 'true';
+            link.onclick = (e) => {
+                e.preventDefault();
+                const source = link.dataset.link;
+                setTriggerValue('clicked', source);
+            };
+        });
+    }
+    """,
+)
+
+# Handle citation link clicks
+citation_result = inline_links(on_clicked_change=lambda: None)
+if citation_result.clicked:
+    # Find the message containing this source
+    clicked_source = citation_result.clicked
+    for msg in reversed(st.session_state.messages):
+        if msg["role"] == "assistant" and clicked_source in msg.get("sources", []):
+            st.session_state.selected_source_idx = msg["id"]
+            st.session_state.selected_sources = [
+                st.session_state.documents[src]
+                for src in msg["sources"]
+                if src in st.session_state.documents
+            ]
+            st.session_state.sidebar_state = "expanded"
+            break
+    st.rerun()
+
 
 with st.sidebar:
     st.markdown(
@@ -166,7 +237,7 @@ for msg in st.session_state.messages:
             msg["content"],
             unsafe_allow_html=True if msg["role"] == "assistant" else False,
         )
-        if msg["role"] == "assistant" and len(msg["documents"]) > 0:
+        if msg["role"] == "assistant" and len(msg.get("sources") or []) > 0:
             st.button(
                 "_Xem nguồn trích dẫn_",
                 key=msg["id"],
@@ -218,6 +289,49 @@ if prompt and not st.session_state.is_streaming:
     st.rerun()
 
 
+def typing_indicator(text: str, **kwargs):
+    safe_text = escape(text)
+    spinner = st.components.v2.component(
+        name="loading_spinner",
+        html=f"""
+        <div class="wrapper">
+            <div class="spinner"></div>
+            <div class="label">{safe_text}</div>
+        </div>
+        """,
+        css="""
+        .wrapper {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+
+            color: var(--st-text-color);
+            font-family: var(--st-font);
+            font-size: 1rem;
+        }
+
+        .spinner {
+            width: 18px;
+            height: 18px;
+
+            border-radius: 50%;
+
+            border: 2px solid var(--st-border-color);
+            border-top-color: var(--st-text-color);
+
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+        """,
+    )
+    spinner(**kwargs)
+
+
 # ── Streaming logic ───────────────────────────────────────────────────────────
 if (
     st.session_state.is_streaming
@@ -225,9 +339,13 @@ if (
     and st.session_state.messages[-1]["role"] == "user"
 ):
     with st.chat_message("assistant"):
+        loading = st.empty()
         placeholder = st.empty()
         msg_id = None
         full_text = ""
+
+        with loading:
+            typing_indicator("ChatDBS đang suy nghĩ...")
 
         try:
             stream = client.runs.stream(
@@ -246,9 +364,15 @@ if (
                     continue  # skip metadata events
 
                 msg, metadata = chunk.data
+
+                # Skip summarization messages
+                if msg.get("additional_kwargs", {}).get("lc_source") == "summarization":
+                    continue
+
                 msg_id = msg["id"]
                 full_text += msg["content"]
                 st.session_state.partial_response = full_text
+                loading.empty()
                 placeholder.markdown(full_text, unsafe_allow_html=True)
         except Exception as e:
             if not full_text:
@@ -269,13 +393,14 @@ if (
         placeholder.markdown(full_text, unsafe_allow_html=True)
         state = client.threads.get_state(thread_id=st.session_state.thread_id)
         documents = state["values"].get("documents") or []
+        st.session_state.documents = documents
 
         st.session_state.messages.append(
             {
                 "id": msg_id,
                 "role": "assistant",
                 "content": full_text,
-                "documents": [documents[src] for src in sources if src in documents],
+                "sources": sources,
             }
         )
 
@@ -283,3 +408,4 @@ if (
     st.session_state.partial_response = ""
     stop_slot.empty()
     st.rerun()
+

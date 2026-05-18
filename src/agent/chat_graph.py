@@ -3,8 +3,7 @@ from typing import Any, Literal, Optional
 from langchain_core.documents import Document
 from langgraph.graph import MessagesState, StateGraph
 
-from src.agent.common import get_llm_classification, AgentClassification
-from src.lib.prompts import ROUTE_QUERY_PROMPT
+from src.agent.common import task_classification_agent
 from src.agent.subagent import (
     basic_agent,
     trend_agent,
@@ -26,7 +25,7 @@ class InputSchema(MessagesState):
 
 class StateSchema(MessagesState):
     # task: Literal["BHKN", "ISO"]
-    documents: Optional[list[dict[str, Document]]]
+    context: Optional[str]
 
 
 class OutputSchema(MessagesState):
@@ -34,16 +33,11 @@ class OutputSchema(MessagesState):
 
 
 def prepare_thread(state: InputSchema) -> dict[str, Any]:
-    return state
+    return {"context": None}
 
 
 def route_query(state: StateSchema) -> AgentType:
-    resp = get_llm_classification().invoke(
-        ROUTE_QUERY_PROMPT.format(
-            schema=AgentClassification.model_json_schema(),
-            query=state["messages"][-1].content,
-        )
-    )
+    resp = task_classification_agent().invoke(state["messages"][-1].content)
 
     agent = "basic_agent"
     if resp["parsing_error"] is None:
@@ -58,7 +52,9 @@ def answer(state: StateSchema) -> dict[str, Any]:
 
 # Define the graph
 graph = (
-    StateGraph(state_schema=StateSchema, input_schema=InputSchema, output_schema=OutputSchema)
+    StateGraph(
+        state_schema=StateSchema, input_schema=InputSchema, output_schema=OutputSchema
+    )
     # define nodes
     .add_node("prepare_thread", prepare_thread)
     .add_node("basic_agent", basic_agent)
