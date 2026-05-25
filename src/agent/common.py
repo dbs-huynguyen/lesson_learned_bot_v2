@@ -1,6 +1,6 @@
 import os
 from enum import Enum
-from typing import Generic, Optional, TypeVar, Callable
+from typing import Generic, Optional, TypeVar, Callable, Any
 from pydantic import BaseModel as PyBaseModel, ConfigDict, Field, model_validator
 from functools import lru_cache
 
@@ -12,34 +12,26 @@ from qdrant_client.http.models import (
     MatchAny,
     DatetimeRange,
 )
-from langchain.messages import SystemMessage
+from langchain.messages import SystemMessage, RemoveMessage
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.documents import Document
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import PydanticOutputParser
-from langchain_openai import OpenAIEmbeddings
+from langchain_community.embeddings import InfinityEmbeddings
 from langchain_ollama import ChatOllama
+from langgraph.config import get_stream_writer
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from src.lib.reranker import MyReranker
 from src.lib.prompts import (
-    BASIC_AGENT_SYSTEM_PROMPT,
     ROUTE_QUERY_PROMPT,
     EXTRACT_KEYWORD_PROMPT,
     EXTRACT_DATE_PROMPT,
     RETRIEVAL_DECISION_PROMPT,
+    SUMMARY_SYSTEM_PROMPT,
 )
 from src.lib.utils import canonicalize_value, canonicalize_date
-
-SYSTEM_PROMPT_REGISTRY: dict[str, ChatPromptTemplate] = {
-    "trend_agent": BASIC_AGENT_SYSTEM_PROMPT,
-    "classification_agent": BASIC_AGENT_SYSTEM_PROMPT,
-    "statistics_agent": BASIC_AGENT_SYSTEM_PROMPT,
-    "basic_agent": BASIC_AGENT_SYSTEM_PROMPT,
-}
-
 
 T = TypeVar("T")
 
@@ -140,9 +132,9 @@ def get_qdrant_store():
     # Lazy import to avoid slow PyTorch loading at module import time
     from langchain_qdrant import FastEmbedSparse, QdrantVectorStore, RetrievalMode
 
-    embeddings = OpenAIEmbeddings(
+    embeddings = InfinityEmbeddings(
         model=os.getenv("EMBEDDING_MODEL"),
-        base_url=os.getenv("EMBEDDING_BASE_URL"),
+        infinity_api_url=os.getenv("EMBEDDING_BASE_URL"),
     )
 
     client = QdrantClient(url=os.getenv("QDRANT_URL"))
@@ -158,11 +150,13 @@ def get_qdrant_store():
     )
 
 
-@lru_cache(maxsize=1)
-def get_reranker():
+@lru_cache
+def get_reranker(top_n: Optional[int] = None, score_threshold: Optional[float] = None):
     return MyReranker(
         base_url=os.getenv("RERANKER_BASE_URL"),
         model=os.getenv("RERANKER_MODEL"),
+        top_n=top_n,
+        score_threshold=score_threshold,
         timeout=120,
     )
 
@@ -189,9 +183,43 @@ def get_base_llm(**kwargs):
 
 
 @lru_cache(maxsize=1)
-def answer_agent(agent_type: AgentType):
+def answer_agent():
     # Lazy import to avoid slow loading at module import time
     from langchain.agents.middleware import SummarizationMiddleware
+
+    class CustomSummarizationMiddleware(SummarizationMiddleware):
+        pass
+        # def before_model(self, state, runtime) -> dict[str, Any] | None:
+        #     messages = state["messages"]
+        #     self._ensure_message_ids(messages)
+
+        #     total_tokens = self.token_counter(messages)
+        #     if not self._should_summarize(messages, total_tokens):
+        #         return None
+
+        #     cutoff_index = self._determine_cutoff_index(messages)
+
+        #     kind, value = self.keep
+        #     if kind == "messages":
+        #         cutoff_index -= value
+
+        #     if cutoff_index <= 0:
+        #         return None
+
+        #     messages_to_summarize, preserved_messages = self._partition_messages(
+        #         messages, cutoff_index
+        #     )
+
+        #     summary = self._create_summary(messages_to_summarize)
+        #     new_messages = self._build_new_messages(summary)
+
+        #     return {
+        #         "messages": [
+        #             RemoveMessage(id=REMOVE_ALL_MESSAGES),
+        #             *new_messages,
+        #             *preserved_messages,
+        #         ]
+        #     }
 
     class DynamicContextMiddleware(AgentMiddleware):
         def wrap_model_call(
@@ -200,42 +228,49 @@ def answer_agent(agent_type: AgentType):
             handler: Callable[[ModelRequest], ModelResponse],
         ) -> ModelResponse:
             ctx = request.runtime.context or {}
-            dynamic_context = ctx.get("context", "")
-            base_content = list(request.system_message.content_blocks or [])
-            new_content = base_content + [{"type": "text", "text": dynamic_context}]
-            new_system_message = SystemMessage(content=new_content)
-            return handler(request.override(system_message=new_system_message))
+            system_message = (
+                request.system_message
+                if request.system_message
+                else SystemMessage(content=ctx.get("system_prompt", ""))
+            )
+            writer = get_stream_writer()
+            writer(
+                {
+                    "type": "reasoning",
+                    "message": "Hoàn tất bước suy luận, bắt đầu trả lời câu hỏi.",
+                }
+            )
+            for msg in request.messages:
+                print(f"{msg.type.upper()}: {msg.content}")
+            return handler(request.override(system_message=system_message))
 
     return create_agent(
         get_base_llm(num_predict=-2, temperature=0.0, top_p=0.9),
-        system_prompt=SYSTEM_PROMPT_REGISTRY[agent_type.value].format(),
         middleware=[
-            DynamicContextMiddleware(),
-            SummarizationMiddleware(
+            CustomSummarizationMiddleware(
                 get_base_llm(
                     num_predict=-2,
                     temperature=0.3,
                     top_p=0.9,
                     tags=["nostream"],
                 ),
-                trigger=[("messages", 4)],
-                keep=("messages", 1),
+                # trigger=[("messages", 4)],
+                # keep=("messages", 1),
+                summary_prompt=SUMMARY_SYSTEM_PROMPT,
             ),
+            DynamicContextMiddleware(),
         ],
-        name=f"answer_{agent_type.value}",
+        name=f"answer_agent",
     )
 
 
 @lru_cache(maxsize=1)
 def task_classification_agent():
     return (
-        {
-            "schema": lambda x: AgentClassification.model_json_schema(),
-            "query": RunnablePassthrough(),
-        }
+        {"query": RunnablePassthrough()}
         | ROUTE_QUERY_PROMPT
         | get_base_llm(
-            num_predict=256,
+            num_predict=50,
             temperature=0.0,
             top_p=0.9,
             tags=["nostream"],
@@ -248,11 +283,15 @@ def task_classification_agent():
 
 @lru_cache(maxsize=1)
 def decision_making_agent():
-    return RETRIEVAL_DECISION_PROMPT | get_base_llm(
-        num_predict=256,
-        temperature=0.0,
-        top_p=0.9,
-        tags=["nostream"],
+    return (
+        {"query": RunnablePassthrough()}
+        | RETRIEVAL_DECISION_PROMPT
+        | get_base_llm(
+            num_predict=50,
+            temperature=0.0,
+            top_p=0.9,
+            tags=["nostream"],
+        )
     )
 
 

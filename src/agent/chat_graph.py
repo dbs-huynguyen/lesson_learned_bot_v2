@@ -1,6 +1,6 @@
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
-from langchain_core.documents import Document
+from langgraph.config import get_stream_writer
 from langgraph.graph import MessagesState, StateGraph
 
 from src.agent.common import task_classification_agent
@@ -10,6 +10,7 @@ from src.agent.subagent import (
     statistics_agent,
     classification_agent,
 )
+from src.agent.subagent.common_node import InputSchema, StateSchema, OutputSchema
 
 AgentType = Literal[
     "basic_agent",
@@ -19,30 +20,28 @@ AgentType = Literal[
 ]
 
 
-class InputSchema(MessagesState):
-    task: Literal["BHKN", "ISO"]
-
-
-class StateSchema(MessagesState):
-    # task: Literal["BHKN", "ISO"]
-    context: Optional[str]
-
-
-class OutputSchema(MessagesState):
-    documents: Optional[list[dict[str, Document]]]
-
-
 def prepare_thread(state: InputSchema) -> dict[str, Any]:
-    return {"context": None}
+    return state
 
 
 def route_query(state: StateSchema) -> AgentType:
+    writer = get_stream_writer()
+
     resp = task_classification_agent().invoke(state["messages"][-1].content)
 
-    agent = "basic_agent"
     if resp["parsing_error"] is None:
         agent = resp["parsed"].agent
-    print(f"Routing to agent: {agent}")
+    else:
+        print(resp["parsing_error"])
+        agent = "basic_agent"
+
+    writer(
+        {
+            "type": "reasoning",
+            "message": f"Chọn {agent.replace('_', ' ').title()} để trả lời câu hỏi.",
+        }
+    )
+
     return agent
 
 
@@ -53,7 +52,9 @@ def answer(state: StateSchema) -> dict[str, Any]:
 # Define the graph
 graph = (
     StateGraph(
-        state_schema=StateSchema, input_schema=InputSchema, output_schema=OutputSchema
+        state_schema=StateSchema,
+        input_schema=InputSchema,
+        output_schema=OutputSchema,
     )
     # define nodes
     .add_node("prepare_thread", prepare_thread)

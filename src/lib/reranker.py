@@ -5,8 +5,6 @@ from typing import Any, Optional
 from pydantic import ConfigDict
 
 from langchain_core.documents import Document, BaseDocumentCompressor
-from langchain_core.retrievers import BaseRetriever
-from langchain_core.runnables import Runnable
 
 
 logger = logging.getLogger(__name__)
@@ -15,9 +13,10 @@ logger = logging.getLogger(__name__)
 class MyReranker(BaseDocumentCompressor):
     base_url: str | URL
     model: str
-    # top_n: Optional[int] = None
-    timeout: int = 30
-    path: str | URL = "score"
+    top_n: Optional[int] = None
+    timeout: int = 120
+    path: str | URL = "rerank"
+    score_threshold: Optional[float] = None
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True
@@ -48,8 +47,10 @@ class MyReranker(BaseDocumentCompressor):
             },
             json={
                 "model": self.model,
-                "encoding_format": "float",
-                "queries": query,
+                "return_documents": False,
+                "raw_scores": False,
+                "top_n": self.top_n,
+                "query": query,
                 "documents": [doc.page_content for doc in documents],
             },
             timeout=self.timeout,
@@ -67,24 +68,20 @@ class MyReranker(BaseDocumentCompressor):
         try:
             result = self._call_api(query, documents)
 
-            scores = result.get("data", [])
+            scores = result.get("results", [])
 
             scored_docs = []
             for item in scores:
                 idx = item["index"]
-                score = item["score"]
+                score = item["relevance_score"]
+                if self.score_threshold is not None and score < self.score_threshold:
+                    continue
                 doc = documents[idx]
-                doc.metadata["rerank_score"] = score
                 scored_docs.append((doc, score))
-
-            scored_docs.sort(key=lambda x: x[1], reverse=True)
-
-            # if self.top_n:
-            #     scored_docs = scored_docs[: self.top_n]
 
             return [doc for doc, _ in scored_docs]
         except requests.RequestException as e:
-            logger.error("Error occurred while calling the API: %s", e)
-            # if self.top_n:
-            #     return documents[: self.top_n]
+            logger.error("Error occurred while reranking: %s", e)
+            if self.top_n:
+                return documents[: self.top_n]
             return documents

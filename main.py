@@ -2,7 +2,7 @@
 import os
 from dotenv import load_dotenv
 
-from langchain_openai import OpenAIEmbeddings
+from langchain_community.embeddings import InfinityEmbeddings
 from langchain_classic.retrievers.contextual_compression import (
     ContextualCompressionRetriever,
 )
@@ -16,9 +16,9 @@ load_dotenv()
 
 def main():
     from langchain_qdrant import QdrantVectorStore, RetrievalMode, FastEmbedSparse
-    embeddings = OpenAIEmbeddings(
+    embeddings = InfinityEmbeddings(
         model=os.getenv("EMBEDDING_MODEL"),
-        base_url=os.getenv("EMBEDDING_BASE_URL"),
+        infinity_api_url=os.getenv("EMBEDDING_BASE_URL"),
     )
     client = QdrantClient(
         url=os.getenv("QDRANT_URL"),
@@ -35,7 +35,8 @@ def main():
     reranker = MyReranker(
         base_url=os.getenv("RERANKER_BASE_URL"),
         model=os.getenv("RERANKER_MODEL"),
-        top_n=10,
+        top_n=20,
+        score_threshold=0.3,
     )
     # print(qdrant_store.client.get_collection("bhkn"))
     compression_retriever = ContextualCompressionRetriever(
@@ -55,12 +56,13 @@ def main():
                 #         ),
                 #     ]
                 # ),
+                "score_threshold": 0.1,
             },
         ),
         base_compressor=reranker,
     )
 
-    query = "AWS S3"
+    query = "Sự cố lỗi trên S3"
 
     print("=" * 10 + " Compression Retriever Results " + "=" * 10)
     docs = compression_retriever.invoke(query)

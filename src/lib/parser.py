@@ -414,7 +414,6 @@ class LessonsLearnedParser(BaseParser):
                 table_body.append(p)
                 continue
 
-
             prefix = ""
             if p.style == "Heading1":
                 prefix = "# "
@@ -475,33 +474,45 @@ class LessonsLearnedParser(BaseParser):
 
         body_text, occurred_at = self._get_body(file_path)
         summary = self._summarize_content(body_text)
-        # print(summary)
+        print(summary)
 
         matched = re.match(r"^([a-zA-Z0-9]+)", file_path.stem)
         if not matched:
             raise ValueError(f"File name does not match expected pattern: <project_name>_yyyymmdd, got {file_path.name}")
         project_name = matched.group(1).lower()
-
-        extractor = MarkdownExtractor(summary)
-        
-        docs: list[MyDocument] = []
-        for page_number, section in enumerate(extractor.list(), 1):
-            id = str(uuid7())
-            docs.append(
-                MyDocument(
-                    id=id,
-                    page_content=extractor.get_section(section).strip(),
-                    metadata=dict(
-                        doc_id=id,
-                        source=file_path.name,
-                        page_number=page_number,
-                        section=section,
-                        doc_type="BHKN",
-                        occurred_at=occurred_at,
-                        project_name=project_name,
-                    ),
-                )
+        id = str(uuid7())
+        docs: list[MyDocument] = [
+            MyDocument(
+                id=id,
+                page_content=summary,
+                metadata=dict(
+                    doc_id=id,
+                    source=file_path.name,
+                    page_number=1,
+                    doc_type="BHKN",
+                    occurred_at=occurred_at,
+                    project_name=project_name,
+                ),
             )
+        ]
+        # extractor = MarkdownExtractor(summary)
+        # for page_number, section in enumerate(extractor.list(), 1):
+        #     id = str(uuid7())
+        #     docs.append(
+        #         MyDocument(
+        #             id=id,
+        #             page_content=extractor.get_section(section).strip(),
+        #             metadata=dict(
+        #                 doc_id=id,
+        #                 source=file_path.name,
+        #                 page_number=page_number,
+        #                 section=section,
+        #                 doc_type="BHKN",
+        #                 occurred_at=occurred_at,
+        #                 project_name=project_name,
+        #             ),
+        #         )
+        #     )
 
         if len(docs) == 0:
             raise ValueError(f"No valid content extracted from {file_path}")
