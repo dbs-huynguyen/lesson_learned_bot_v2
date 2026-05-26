@@ -176,7 +176,7 @@ def get_base_llm(**kwargs):
         keep_alive="1h",
         rate_limiter=rate_limiter,
         seed=9999,
-        num_ctx=32000,
+        num_ctx=int(os.getenv("OLLAMA_NUM_CTX", 16000)),
         reasoning=False,
     )
     return ChatOllama(**base_ollama_config, **kwargs)
