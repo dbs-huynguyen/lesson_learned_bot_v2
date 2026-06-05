@@ -1,9 +1,13 @@
 from typing import Any, Literal
 
 from langgraph.config import get_stream_writer
-from langgraph.graph import MessagesState, StateGraph
+from langgraph.graph import StateGraph
 
-from src.agent.common import task_classification_agent
+from src.agent.common import (
+    task_classification_1_agent,
+    task_classification_2_agent,
+    task_classification_3_agent,
+)
 from src.agent.subagent import (
     basic_agent,
     trend_agent,
@@ -26,14 +30,22 @@ def prepare_thread(state: InputSchema) -> dict[str, Any]:
 
 def route_query(state: StateSchema) -> AgentType:
     writer = get_stream_writer()
+    query = state["messages"][-1].content
 
-    resp = task_classification_agent().invoke(state["messages"][-1].content)
-
-    if resp["parsing_error"] is None:
-        agent = resp["parsed"].agent
-    else:
-        print(resp["parsing_error"])
+    try:
+        complement = task_classification_1_agent().invoke(query)
+        print(f"Complement: {complement}")
+        intent = task_classification_2_agent().invoke(complement)
+        print(f"Intent: {intent}")
+        if intent == "detail":
+            agent = "basic_agent"
+        else:
+            agent = task_classification_3_agent().invoke(query)
+    except Exception as e:
+        print(str(e))
         agent = "basic_agent"
+
+    print(f"Agent: {agent}")
 
     writer(
         {

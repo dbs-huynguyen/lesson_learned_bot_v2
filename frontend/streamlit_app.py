@@ -98,7 +98,7 @@ def repl_citation(match, sources: list[str], msg_id: str = None) -> str:
     msg_id = msg_id if msg_id else ""
     for i, src in enumerate(sources, 1):
         if match.group(2) == src:
-            return f'<button data-link="{src}" data-msg-id="{msg_id}" style="{button_style}"><small>[{src.split(".")[0]}]</small></button>'
+            return f'<button data-link="{src}" data-msg-id="{msg_id}" style="{button_style}"><small>[{i}]</small></button>'
     return ""
 
 
@@ -175,8 +175,6 @@ if citation_result.clicked:
     clicked_source = citation_result.clicked
     message_id = citation_result.message_id
 
-    print(f"Clicked: {clicked_source}, Message ID: {message_id}")
-
     # If we have message_id, directly use it (faster)
     if message_id:
         st.session_state.selected_source_idx = message_id
@@ -239,7 +237,7 @@ with st.sidebar:
             disabled=True,
             label_visibility="collapsed",
         )
-        st.caption(item["page_content"])
+        st.caption(item["page_content"], unsafe_allow_html=True, text_alignment="justify")
 
 
 # ── Greeting (shown when no messages) ────────────────────────────────────────
@@ -290,23 +288,24 @@ if st.session_state.is_streaming:
                 icon=":material/stop_circle:",
                 use_container_width=True,
             ):
-                client.runs.cancel(
-                    thread_id=st.session_state.thread_id,
-                    run_id=st.session_state.run_id,
-                    wait=True,
-                )
-                st.session_state.is_streaming = False
-                response = ""
-                if st.session_state.partial_response:
-                    response = st.session_state.partial_response
-                    st.session_state.partial_response = ""
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": f"{response} *(đã dừng)*",
-                    }
-                )
-                st.rerun()
+                if st.session_state.run_id:
+                    client.runs.cancel(
+                        thread_id=st.session_state.thread_id,
+                        run_id=st.session_state.run_id,
+                        wait=True,
+                    )
+                    st.session_state.is_streaming = False
+                    response = ""
+                    if st.session_state.partial_response:
+                        response = st.session_state.partial_response
+                        st.session_state.partial_response = ""
+                    st.session_state.messages.append(
+                        {
+                            "role": "assistant",
+                            "content": f"{response} *(đã dừng)*",
+                        }
+                    )
+                    st.rerun()
 
 
 # ── Chat input ────────────────────────────────────────────────────────────────
@@ -350,18 +349,14 @@ if (
                 stream_mode=["messages-tuple", "custom"],
                 stream_subgraphs=True,
                 input={"messages": [st.session_state.messages[-1]]},
-                after_seconds=5,
+                on_run_created=lambda v: setattr(st.session_state, "run_id", v["run_id"]),
             )
 
             for chunk in stream:
-                print(chunk.event)
                 if chunk.event == "metadata":
-                    print("Run ID:", chunk.data)
-                    st.session_state.run_id = chunk.data["run_id"]
                     continue  # skip metadata events
 
                 if chunk.event.split("|")[0] == "custom":
-                    print(chunk.data)
                     if chunk.data.get("type") == "reasoning":
                         if not is_first_custom_chunk:
                             status.update(expanded=True)
@@ -387,19 +382,17 @@ if (
                     st.session_state.partial_response = full_text
                     placeholder.markdown(full_text, unsafe_allow_html=True)
         except Exception as e:
-            print(e)
             if not full_text:
                 full_text = f"⚠️ Lỗi: {e}"
 
         sources = list(
             dict.fromkeys(
-                re.findall(r"\[([A-Za-z0-9_]+\.[A-Za-z]+#page=\d+)\]", full_text)
+                re.findall(r"\[source=([A-Za-z0-9_]+\.[A-Za-z]+#page=\d+)\]", full_text)
             )
         )
-        print(sources)
 
         full_text = re.sub(
-            r"`*(\[)([A-Za-z0-9_]+\.[A-Za-z]+#page=\d+)(\])`*",
+            r"`*(\[)source=([A-Za-z0-9_]+\.[A-Za-z]+#page=\d+)(\])`*",
             lambda m: repl_citation(m, sources, msg_id),
             full_text,
         )

@@ -5,6 +5,7 @@ from pydantic import BaseModel as PyBaseModel, ConfigDict, Field, model_validato
 from functools import lru_cache
 
 from qdrant_client import QdrantClient
+from langchain_qdrant import QdrantVectorStore, RetrievalMode
 from qdrant_client.http.models import (
     Filter,
     FieldCondition,
@@ -17,19 +18,27 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.documents import Document
 from langchain_core.rate_limiters import InMemoryRateLimiter
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableAssign
+from langchain_core.output_parsers import StrOutputParser
+from langchain_classic.output_parsers.boolean import BooleanOutputParser
+from langchain_classic.retrievers.document_compressors import LLMChainFilter
 from langchain_community.embeddings import InfinityEmbeddings
 from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from langgraph.config import get_stream_writer
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from src.lib.reranker import MyReranker
 from src.lib.prompts import (
-    ROUTE_QUERY_PROMPT,
+    ROUTE_QUERY_STAGE_ONE_PROMPT,
     EXTRACT_KEYWORD_PROMPT,
     EXTRACT_DATE_PROMPT,
     RETRIEVAL_DECISION_PROMPT,
+    ROUTE_QUERY_STAGE_THREE_PROMPT,
+    ROUTE_QUERY_STAGE_TWO_PROMPT,
     SUMMARY_SYSTEM_PROMPT,
+    REWRITE_QUERY_PROMPT,
+    GRADE_DOCS_PROMPT,
 )
 from src.lib.utils import canonicalize_value, canonicalize_date
 
@@ -74,29 +83,80 @@ class AgentType(str, Enum):
 
 
 class AgentClassification(BaseModel):
-    agent: AgentType = Field(
-        AgentType.BASIC,
-        description=("The name of the sub-agent to route the query to."),
+    # agent: AgentType = Field(
+    #     AgentType.BASIC,
+    #     description=("The name of the sub-agent to route the query to."),
+    # )
+    intent: str = Field(
+        default=None,
+        description=(
+            "Phân loại ý định của người dùng.\n"
+            "Chỉ chọn 1 trong: 'CHI_TIET' hoặc 'TONG_HOP'"
+        ),
+    )
+    complement: str = Field(
+        default=None,
+        description="Phần bổ ngữ đã được xác định hoặc rỗng.",
     )
 
 
 class ProjectName(str, Enum):
     AUTH = "auth"
+    AUTH_CONSOLE = "authconsole"
+    AUTH_DATA = "authdata"
     PASS = "pass"
     TOKEN = "token"
     SIGN = "sign"
     CONTRACT = "contract"
-    LINK = "link"
+    LIVE = "live"
+    LEARN = "learn"
     PIVOT = "pivot"
+    CARECONNE = "careconne"
     CDS = "cds"
+    LEO_SOPHIA = "leosophia"
     MONSHIN_APP = "monshinapp"
     PREMONSHIN_APP = "premonshinapp"
+    ALIVE_MONITORING = "alivemonitoring"
+
+
+class ChunkType(str, Enum):
+    DESCRIPTION = "mo_ta"
+    ROOT_CAUSE = "nguyen_nhan"
+    SOLUTION = "khac_phuc"
+    LESSON = "bai_hoc"
+
+
+class Department(str, Enum):
+    SOFTWARE = "BP Phát triển phần mềm"
+    ISO = "Bộ phận Ban ISO"
 
 
 class ExtractionKeyword(BaseModel):
     project_name: Optional[ListFilter[ProjectName]] = Field(
         default=None,
-        description="Project name is mentioned in the query.",
+        description="Dự án được nhắc đến trong truy vấn (nếu có).",
+    )
+
+    chunk_type: Optional[ListFilter[ChunkType]] = Field(
+        default=None,
+        description=(
+            "Phần tài liệu được nhắc đến trong truy vấn.\n"
+            "Ví dụ:\n"
+            "- 'nguyên nhân', 'lý do', 'nguồn gốc',... -> nguyen_nhan\n"
+            "- 'cách xử lý', 'giải pháp', 'hướng khắc phục', 'cách giải quyết', 'cách fix', 'cách sửa',... -> khac_phuc\n"
+            "- 'bài học', 'kinh nghiệm', 'đề xuất', 'cải tiến',... -> bai_hoc\n"
+            "- Giá trị mặc định -> mo_ta"
+        ),
+    )
+
+    department: Optional[ListFilter[Department]] = Field(
+        default=None,
+        description=(
+            "Phòng ban được nhắc đến trong truy vấn (nếu có).\n"
+            "Ví dụ:\n"
+            "- 'phòng phát triển phần mềm', 'bộ phận phát triển phần mềm', 'team phát triển phần mềm',... -> BP Phát triển phần mềm\n"
+            "- 'bộ phận ISO', 'phòng ISO', 'team ISO',... -> Bộ phận Ban ISO"
+        ),
     )
 
     @model_validator(mode="after")
@@ -106,11 +166,18 @@ class ExtractionKeyword(BaseModel):
 
         return self
 
+    @model_validator(mode="after")
+    def normalize(self):
+        if self.chunk_type is None:
+            self.chunk_type = {"in": ["mo_ta"]}
+
+        return self
+
 
 class ExtractionDate(BaseModel):
     occurred_at: Optional[RangeFilter[str]] = Field(
         default=None,
-        description="The datetime mentioned in the query. Can be a specific point in time or a range.",
+        description="Thời gian được đề cập trong truy vấn. Có thể là một thời điểm cụ thể hoặc một khoảng thời gian. Ví dụ: 'ngày 1/1/2025', 'tháng 1 năm 2025', 'năm 2025', hoặc 'từ ngày 1/1/2025 đến ngày 31/12/2025'.",
     )
 
     @model_validator(mode="after")
@@ -127,22 +194,31 @@ class ExtractionDate(BaseModel):
         return self
 
 
-@lru_cache(maxsize=1)
-def get_qdrant_store():
-    # Lazy import to avoid slow PyTorch loading at module import time
-    from langchain_qdrant import FastEmbedSparse, QdrantVectorStore, RetrievalMode
+class GradeDoc(BaseModel):
+    relevant: bool = Field(
+        description="Whether the document is relevant to the query.",
+    )
 
-    embeddings = InfinityEmbeddings(
+
+@lru_cache
+def get_embeddings():
+    return InfinityEmbeddings(
         model=os.getenv("EMBEDDING_MODEL"),
         infinity_api_url=os.getenv("EMBEDDING_BASE_URL"),
     )
+
+
+@lru_cache(maxsize=1)
+def get_qdrant_store(collection_name: str) -> QdrantVectorStore:
+    # Lazy import to avoid slow PyTorch loading at module import time
+    from langchain_qdrant import FastEmbedSparse
 
     client = QdrantClient(url=os.getenv("QDRANT_URL"))
 
     return QdrantVectorStore(
         client=client,
-        collection_name="bhkn",
-        embedding=embeddings,
+        collection_name=collection_name,
+        embedding=get_embeddings(),
         vector_name="dense",
         sparse_embedding=FastEmbedSparse(),
         sparse_vector_name="sparse",
@@ -169,20 +245,43 @@ rate_limiter = InMemoryRateLimiter(
 
 
 def get_base_llm(**kwargs):
-    base_ollama_config = dict(
+    # if "num_predict" in kwargs:
+    #     kwargs["max_completion_tokens"] = kwargs.pop("num_predict")
+    # return ChatOpenAI(
+    #     model=os.getenv("OPENAI_LLM_MODEL"),
+    #     api_key=os.getenv("OPENAI_API_KEY"),
+    #     base_url=os.getenv("OPENAI_BASE_URL"),
+    #     timeout=120,
+    #     rate_limiter=rate_limiter,
+    #     seed=9999,
+    #     extra_body={
+    #         "chat_template_kwargs": {"enable_thinking": False},
+    #     },
+    #     reasoning_effort=None,
+    #     **kwargs,
+    # )
+
+    base_config = dict(
         model=os.getenv("OLLAMA_LLM_MODEL"),
         base_url=os.getenv("OLLAMA_BASE_URL"),
         client_kwargs={"timeout": 120},
-        keep_alive="1h",
-        rate_limiter=rate_limiter,
+        keep_alive=-1,
+        # rate_limiter=rate_limiter,
         seed=9999,
-        num_ctx=int(os.getenv("OLLAMA_NUM_CTX", 16000)),
+        num_ctx=int(os.getenv("OLLAMA_NUM_CTX")),
         reasoning=False,
+        presence_penalty=1.5,
+        temperature=1,
+        top_k=20,
+        top_p=0.95,
     )
-    return ChatOllama(**base_ollama_config, **kwargs)
+
+    config_with_kwargs = {**base_config, **kwargs}
+
+    return ChatOllama(**config_with_kwargs)
 
 
-@lru_cache(maxsize=1)
+@lru_cache
 def answer_agent():
     # Lazy import to avoid slow loading at module import time
     from langchain.agents.middleware import SummarizationMiddleware
@@ -240,22 +339,15 @@ def answer_agent():
                     "message": "Hoàn tất bước suy luận, bắt đầu trả lời câu hỏi.",
                 }
             )
-            for msg in request.messages:
-                print(f"{msg.type.upper()}: {msg.content}")
             return handler(request.override(system_message=system_message))
 
     return create_agent(
-        get_base_llm(num_predict=-2, temperature=0.0, top_p=0.9),
+        get_base_llm(temperature=0.3, presence_penalty=0.0),
         middleware=[
             CustomSummarizationMiddleware(
-                get_base_llm(
-                    num_predict=-2,
-                    temperature=0.3,
-                    top_p=0.9,
-                    tags=["nostream"],
-                ),
-                # trigger=[("messages", 4)],
-                # keep=("messages", 1),
+                get_base_llm(temperature=0.7, tags=["nostream"]),
+                trigger=[("tokens", 5000)],
+                keep=("messages", 1),
                 summary_prompt=SUMMARY_SYSTEM_PROMPT,
             ),
             DynamicContextMiddleware(),
@@ -264,38 +356,54 @@ def answer_agent():
     )
 
 
-@lru_cache(maxsize=1)
-def task_classification_agent():
+@lru_cache
+def task_classification_1_agent():
     return (
-        {"query": RunnablePassthrough()}
-        | ROUTE_QUERY_PROMPT
-        | get_base_llm(
-            num_predict=50,
-            temperature=0.0,
-            top_p=0.9,
-            tags=["nostream"],
-        ).with_structured_output(
-            AgentClassification,
-            include_raw=True,
-        )
+        ROUTE_QUERY_STAGE_ONE_PROMPT
+        | get_base_llm(temperature=0.5, tags=["nostream"])
+        | StrOutputParser()
     )
 
 
-@lru_cache(maxsize=1)
+@lru_cache
+def task_classification_2_agent():
+    return (
+        ROUTE_QUERY_STAGE_TWO_PROMPT
+        | get_base_llm(temperature=0.5, tags=["nostream"])
+        | StrOutputParser()
+    )
+
+
+@lru_cache
+def task_classification_3_agent():
+    return (
+        ROUTE_QUERY_STAGE_THREE_PROMPT
+        | get_base_llm(temperature=0.5, tags=["nostream"])
+        | StrOutputParser()
+    )
+
+
+@lru_cache
 def decision_making_agent():
     return (
         {"query": RunnablePassthrough()}
         | RETRIEVAL_DECISION_PROMPT
-        | get_base_llm(
-            num_predict=50,
-            temperature=0.0,
-            top_p=0.9,
-            tags=["nostream"],
-        )
+        | get_base_llm(temperature=0.5, tags=["nostream"])
+        | BooleanOutputParser()
     )
 
 
-@lru_cache(maxsize=1)
+@lru_cache
+def rewrite_query_agent():
+    return (
+        {"messages": RunnablePassthrough()}
+        | REWRITE_QUERY_PROMPT
+        | get_base_llm(temperature=0.7, tags=["nostream"])
+        | StrOutputParser()
+    )
+
+
+@lru_cache
 def keyword_extraction_agent():
     return (
         dict(
@@ -303,19 +411,13 @@ def keyword_extraction_agent():
             query=RunnablePassthrough(),
         )
         | EXTRACT_KEYWORD_PROMPT
-        | get_base_llm(
-            num_predict=256,
-            temperature=0.0,
-            top_p=0.9,
-            tags=["nostream"],
-        ).with_structured_output(
-            ExtractionKeyword,
-            include_raw=True,
+        | get_base_llm(temperature=0, tags=["nostream"]).with_structured_output(
+            ExtractionKeyword
         )
     )
 
 
-@lru_cache(maxsize=1)
+@lru_cache
 def date_extraction_agent():
     return (
         dict(
@@ -324,15 +426,17 @@ def date_extraction_agent():
             query=RunnablePassthrough(),
         )
         | EXTRACT_DATE_PROMPT
-        | get_base_llm(
-            num_predict=256,
-            temperature=0.0,
-            top_p=0.9,
-            tags=["nostream"],
-        ).with_structured_output(
-            ExtractionDate,
-            include_raw=True,
+        | get_base_llm(temperature=0, tags=["nostream"]).with_structured_output(
+            ExtractionDate
         )
+    )
+
+
+@lru_cache
+def relevance_grading_agent():
+    return LLMChainFilter.from_llm(
+        llm=get_base_llm(temperature=0.5, tags=["nostream"]),
+        prompt=GRADE_DOCS_PROMPT,
     )
 
 
@@ -400,3 +504,33 @@ def merge_documents(
     if right is None:
         return left
     return {**left, **right}
+
+
+def build_relevant_docs_ctx(docs: list[Document]) -> tuple[str, dict[str, Document]]:
+    if not docs:
+        return "Không tìm thấy tài liệu phù hợp.", {}
+
+    xml_docs = ["<documents>"]
+    for idx, doc in enumerate(docs, 1):
+        source = doc.metadata["source"]
+        page = doc.metadata["page_number"]
+        project = doc.metadata["project_name"]
+        occurred_at = doc.metadata["occurred_at"]
+
+        open_document_tag = f'<document source="{source}" page="{page}" project_name="{project.capitalize()}" occurred_at="{occurred_at}">'
+        close_document_tag = "</document>"
+
+        xml_docs.append(open_document_tag)
+        xml_docs.append(doc.page_content.strip())
+        xml_docs.append(close_document_tag)
+    xml_docs.append("</documents>")
+
+    relevant_docs = "\n".join(xml_docs)
+    # print(relevant_docs)
+
+    documents = {
+        f"{doc.metadata['source']}#page={doc.metadata['page_number']}": doc
+        for doc in docs
+    }
+
+    return relevant_docs, documents

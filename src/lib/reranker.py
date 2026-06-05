@@ -6,7 +6,6 @@ from pydantic import ConfigDict
 
 from langchain_core.documents import Document, BaseDocumentCompressor
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -18,9 +17,7 @@ class MyReranker(BaseDocumentCompressor):
     path: str | URL = "rerank"
     score_threshold: Optional[float] = None
 
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True
-    )
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _enforce_trailing_slash(self, base_url: URL) -> URL:
         if base_url.raw_path.endswith(b"/"):
@@ -85,3 +82,30 @@ class MyReranker(BaseDocumentCompressor):
             if self.top_n:
                 return documents[: self.top_n]
             return documents
+
+    def compress_documents_with_score(
+        self, documents: list[Document], query: str, **kwargs
+    ) -> list[tuple[Document, float]]:
+        if not documents:
+            return []
+
+        try:
+            result = self._call_api(query, documents)
+
+            scores = result.get("results", [])
+
+            scored_docs = []
+            for item in scores:
+                idx = item["index"]
+                score = item["relevance_score"]
+                if self.score_threshold is not None and score < self.score_threshold:
+                    continue
+                doc = documents[idx]
+                scored_docs.append((doc, score))
+
+            return scored_docs
+        except requests.RequestException as e:
+            logger.error("Error occurred while reranking: %s", e)
+            if self.top_n:
+                return [(doc, 0.0) for doc in documents[: self.top_n]]
+            return [(doc, 0.0) for doc in documents]

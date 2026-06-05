@@ -4,7 +4,6 @@ from enum import Enum
 from typing import Any
 
 import dateparser
-from langchain_core.documents import Document
 
 VIETNAMESE_MAP = {
     "á": "a",
@@ -180,7 +179,6 @@ def clean_text(s: str) -> str:
     s = re.sub(r"^([IVXLCDM\da-z]\s*[\./\)])\s*(.+)", r"\1 \2", s)
     if re.search(r"-+media/image1.png-+", s):
         s = ""
-        print(s)
     if match := re.match(r"^(\s*)--\s*(.+)", s):
         s = f"{match.group(1)}* {match.group(2)}"
     else:
@@ -213,30 +211,3 @@ def canonicalize_date(value: str) -> str:
     if value is not None:
         value = value.strftime("%Y-%m-%d")
     return value
-
-
-def build_relevant_docs_ctx(docs: list[Document]) -> tuple[str, dict[str, Document]]:
-    for i, doc in enumerate(docs, 1):
-        print(f"{i}: {doc.metadata['occurred_at']} - {doc.metadata['source']}")
-
-    relevant_docs = "\n\n".join(
-        [
-            (
-                f"{doc.metadata['source']}\n"
-                f"Trang: {doc.metadata['page_number']}\n"
-                f"Ngày ghi nhận: {doc.metadata['occurred_at']}\n"
-                f"{doc.page_content.strip()}"
-            )
-            for doc in docs
-        ]
-    )
-
-    if not relevant_docs:
-        relevant_docs = "Không tìm thấy tài liệu phù hợp."
-
-    documents = {
-        f"{doc.metadata['source']}#page={doc.metadata['page_number']}": doc
-        for doc in docs
-    }
-
-    return relevant_docs, documents

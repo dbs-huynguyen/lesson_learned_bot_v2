@@ -1,17 +1,23 @@
 import pytz
+import operator
+import time
 from datetime import datetime
-from typing import Any, Optional, Union, Annotated, Literal
+from typing import Any, Optional, TypedDict, Union, Annotated, Literal
 
 from qdrant_client.http.models import Filter
+from langchain.messages import AIMessage
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.config import get_stream_writer
 from langgraph.graph import MessagesState
+from langgraph.types import Send
 
 from src.agent.common import (
     decision_making_agent,
     keyword_extraction_agent,
     date_extraction_agent,
+    build_relevant_docs_ctx,
+    rewrite_query_agent,
     to_qdrant_filter,
     merge_documents,
     answer_agent,
@@ -19,11 +25,16 @@ from src.agent.common import (
     ExtractionKeyword,
     MetadataFilter,
 )
-from src.lib.prompts import ANSWER_DIRECT_SYSTEM_PROMPT
 
 
 class InputSchema(MessagesState):
     pass
+
+
+class ContextSchema(TypedDict):
+    top_k: int
+    score_threshold: float
+    system_prompt: ChatPromptTemplate
 
 
 class StateSchema(MessagesState):
@@ -31,8 +42,19 @@ class StateSchema(MessagesState):
     date_filter: Optional[MetadataFilter[ExtractionDate]]
     keyword_filter: Optional[MetadataFilter[ExtractionKeyword]]
     metadata_filter: Optional[Filter]
-    system_prompt: Optional[ChatPromptTemplate]
-    relevant_docs: Optional[str]
+    relevant_docs: str
+    final_docs: Annotated[list[Document], operator.add]
+    system_prompt: str
+    top_k: Optional[int]
+    score_threshold: Optional[float]
+    collection_name: Optional[str]
+    use_reranking: Optional[bool]
+
+
+class ContextSchema(TypedDict):
+    top_k: int
+    score_threshold: float
+    system_prompt: ChatPromptTemplate
 
 
 class OutputSchema(MessagesState):
@@ -42,36 +64,49 @@ class OutputSchema(MessagesState):
 def decide_retrieval(
     state: StateSchema,
 ) -> Literal["retrieve_documents", "answer_directly"]:
-    writer = get_stream_writer()
-    resp = decision_making_agent().invoke(state["messages"][-1].content)
-    print(f"Should retrieve relevant documents: {resp.content}")
-    if resp.content.strip().lower() == "yes":
-        writer(
-            {
-                "type": "reasoning",
-                "message": "Truy xuất tài liệu liên quan.",
-            }
-        )
+    should_retrieve = decision_making_agent().invoke(state["messages"][-1].content)
+    print(f"Should retrieve: {should_retrieve}")
+    return "retrieve_documents"
+
+    if should_retrieve:
         return "retrieve_documents"
     else:
         return "answer_directly"
 
 
 def answer_directly(state: StateSchema) -> dict[str, Any]:
-    return {"system_prompt": ANSWER_DIRECT_SYSTEM_PROMPT}
+    message = "Xin lỗi nhưng tôi không thể trả lời câu hỏi của bạn."
+    return {"messages": [AIMessage(message)]}
+
+
+def rewrite_query(state: StateSchema) -> Send:
+    # new_query = rewrite_query_agent().invoke(state["messages"])
+    # print("Original query:", state["messages"][-1].content)
+    # print("New query:", new_query)
+    return Send(
+        "rag_agent",
+        dict(
+            query=state["messages"][-1].content,
+            new_query=state["messages"][-1].content,
+            top_k=state["top_k"],
+            score_threshold=state["score_threshold"],
+            collection_name=state["collection_name"],
+            use_reranking=state["use_reranking"],
+        ),
+    )
 
 
 def extract_date(state: StateSchema) -> dict[str, Any]:
-    # resp = date_extraction_agent().invoke(
-    #     dict(
-    #         query=state["messages"][-1].content,
-    #         now=datetime.now(tz=pytz.timezone("Asia/Ho_Chi_Minh")).strftime("%Y-%m-%d"),
-    #     )
-    # )
+    resp = date_extraction_agent().invoke(
+        dict(
+            query=state["messages"][-1].content,
+            now=datetime.now(tz=pytz.timezone("Asia/Ho_Chi_Minh")).strftime("%Y-%m-%d"),
+        )
+    )
 
     date_filter = None
-    # if resp["parsing_error"] is None:
-    #     date_filter = MetadataFilter[ExtractionDate](must=[resp["parsed"]])
+    if resp["parsing_error"] is None:
+        date_filter = MetadataFilter[ExtractionDate](must=[resp["parsed"]])
 
     return {"date_filter": date_filter}
 
@@ -104,17 +139,20 @@ def combine_filter(state: StateSchema) -> dict[str, Any]:
     return {"metadata_filter": metadata_filter}
 
 
+def merge_docs(state: StateSchema) -> dict[str, Any]:
+    # docs = deduplicate(state["final_docs"])
+    relevant_docs, documents = build_relevant_docs_ctx(state["final_docs"])
+    return {"relevant_docs": relevant_docs, "documents": documents}
+
+
 def answer(state: StateSchema) -> dict[str, Any]:
-    if "relevant_docs" in state and state["relevant_docs"]:
-        system_prompt = state["system_prompt"].format(
-            relevant_docs=state["relevant_docs"]
-        )
-    else:
-        system_prompt = state["system_prompt"].format()
     response = answer_agent().invoke(
         input={"messages": state["messages"]},
-        context={"system_prompt": system_prompt},
+        context={
+            "system_prompt": state["system_prompt"].format(
+                relevant_docs=state["relevant_docs"]
+            )
+        },
     )
-    # [print(f"{msg.type.upper()}: {msg.content}\n") for msg in response["messages"]]
 
     return {"messages": [response["messages"][-1]]}

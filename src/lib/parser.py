@@ -9,22 +9,149 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import Any, Generator, Callable
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from docx2python import docx2python
 from docx2python.depth_collector import Par
 from docx2python.iterators import iter_paragraphs
-from langchain_ollama import OllamaLLM
+from langchain_ollama import OllamaLLM, ChatOllama
+from langchain.messages import SystemMessage, HumanMessage
 from langchain_core.documents import Document
 from langchain_core.utils.uuid import uuid7
-from markdown_extract import MarkdownExtractor
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from langchain_text_splitters import (
+    MarkdownHeaderTextSplitter,
+    RecursiveCharacterTextSplitter,
+)
 
+# from markdown_extract import MarkdownExtractor
+
+from src.agent.common import get_base_llm
 from src.lib.utils import TypeEnum, RoleEnum, handle_link, clean_text
-from src.lib.prompts import SUMMARIZE_REPORT_PROMPT
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 
+ADD_CONTEXTUAL_PROMPT_old = ChatPromptTemplate.from_template("""
+You are an expert at adding context to document chunks.
+
+Given a document and a specific chunk from that document, write a SHORT context (1 sentence) in Vietnamese that helps situate the chunk within the document.
+
+The context should include:
+- Key entities mentioned earlier in the document
+- Any important context that helps understand this chunk
+
+Keep it brief - just enough to disambiguate the chunk.
+Output ONLY the contextual prefix, nothing else.
+
+Full Document:
+{document}
+
+Chunk to contextualize:
+{chunk}
+
+Write a brief contextual prefix for this chunk:
+""".strip())
+
+
+ADD_CONTEXTUAL_PROMPT = ChatPromptTemplate.from_template("""
+Bạn là chuyên gia trong việc bổ sung ngữ cảnh cho các đoạn văn bản.
+
+Cho một tài liệu markdown mô tả sự cố, hãy mô tả lại sự cố bằng một đoạn văn ngắn (1-2 câu).
+
+Đoạn văn cần bao gồm:
+- Các thực thể chính được đề cập trong tài liệu mô tả sự cố.
+
+Không thêm các từ dẫn như: 'Sự cố xảy ra khi', 'Sự cố', 'Sự không phù hợp',...
+Chỉ xuất ra tiền tố ngữ cảnh, không có gì khác.
+
+Tài liệu mô tả sự cố:
+{document}
+""".strip())
+
+
+EXTRACT_SYSTEM_PROMPT = ChatPromptTemplate.from_template("""
+Bạn là một kỹ sư Dữ liệu Cấp cao và chuyên gia QA Phần mềm.
+Nhiệm vụ của bạn là chuyển đổi tài liệu Incident/CAPA phần mềm dạng Markdown thành cấu trúc JSON đề phục vụ hệ thống RAG nâng cao.
+
+JSON schema bắt buộc:
+{schema}
+
+Yêu cầu:
+- Chỉ trả về JSON hợp lệ, không giải thích gì thêm.
+
+Tài liệu gốc:
+{markdown_text}
+""".strip())
+
+
+GENERATE_RELEVANT_QUESTIONS_SYSTEM_PROMPT = PromptTemplate(
+    template="""
+Bạn là một kỹ sư Dữ liệu Cấp cao và chuyên gia QA Phần mềm.
+Nhiệm vụ của bạn là chuyển đổi tài liệu Incident/CAPA phần mềm dạng Markdown thành cấu trúc JSON đề phục vụ hệ thống RAG nâng cao.
+
+Quyền lực đặc biệt dành cho bạn (Để tối ưu Score cho câu hỏi Tổng hợp):
+Hệ thống RAG hiện tại đang gặp lỗi: Khi người dùng hỏi câu chi tiết kỹ thuật thì tìm được, nhưng hỏi câu tổng hợp như 'Hãy tổng hợp các biện pháp phòng ngừa...' hoặc 'Bài học kinh nghiệm về hệ thống X' thì Score Embedding bị thấp do lệch pha từ khóa.
+
+Vì vậy, tại trường 'cau_hoi', bạn hãy đóng vai một Giám đốc Công nghệ hoặc Kiểm toán viên QA, tự suy nghĩ ra 3-5 câu hỏi mang tính KHÁI QUÁT, TỔNG HỢP hoặc PHÒNG NGỪA RỦI RO hướng đến các giải pháp/bài học trong tài liệu này. 
+Các câu hỏi này PHẢI chứa các cụm từ như: 'tổng hợp', 'biện pháp phòng ngừa', 'ngăn ngừa phát sinh', 'bài học kinh nghiệm', 'cải tiến quy trình'.
+
+JSON schema bắt buộc:
+{schema}
+
+Yêu cầu:
+- Chỉ trả về JSON hợp lệ, không giải thích gì thêm.
+
+Tài liệu:
+{context}
+""".strip(),
+    input_variables=["context", "schema"],
+)
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+
+class LessonLearnedKnowledge(BaseModel):
+    don_vi_lien_quan: str = Field(
+        ..., description="Bộ phận xảy ra sự cố. Ví dụ: BP Phát triển phần mềm"
+    )
+    he_thong_bi_anh_huong: str = Field(
+        ...,
+        description="Tên hệ thống, module hoặc ứng dụng gặp lỗi. Ví dụ: TOKEN, module HN",
+    )
+
+    hien_tuong: str = Field(
+        ...,
+        description="Mô tả ngắn gọn hiện tượng lỗi đứng từ góc nhìn người dùng/khách hàng",
+    )
+    nguyen_nhan_ky_thuat: str = Field(
+        ..., description="Chi tiết nguyên nhân kỹ thuật dẫn đến lỗi"
+    )
+    nhom_nguyen_nhan: str = Field(
+        ...,
+        description="Phân loại nhóm lỗi để thống kê. Chỉ chọn 1 trong: 'Lỗi cấu hình', 'Lỗi code (Bug)', 'Quy trình triển khai (Deployment/CICD)', 'Lỗi hạ tầng', 'Lỗi con người (Human Error)'",
+    )
+
+    bien_phap_khac_phuc: list[str] = Field(
+        ..., description="Danh sách các hành động sửa lỗi khẩn cấp hoặc dài hạn."
+    )
+    bai_hoc_rut_ra: list[str] = Field(
+        ...,
+        description="Danh sách các bài học kinh nghiệm hoặc quy tắc cấu hình để tránh tái diễn",
+    )
+    cai_tien_de_xuat: list[str] = Field(
+        ..., description="Các đề xuất cập nhật rủi ro hoặc cải tiến hệ thống nếu có"
+    )
+
+    # cau_hoi_tong_hop_phong_ngua: list[str] = Field(..., description="Sinh ra từ 3-5 câu hỏi giả định mang tính khái quát, tổng hợp hoặc định hướng phòng ngừa/cải tiến rủi ro mà người dùng có thể sẽ hỏi để tìm kiếm giải pháp (Ví dụ: 'Tổng hợp các biện pháp phòng ngừa...', 'Làm sao để ngăn chặn rủi ro triển khai thủ công?')")
+
+
+class RelevantQuestion(BaseModel):
+    cau_hoi: list[str] = Field(
+        ...,
+        description="Sinh ra từ 3-5 câu hỏi giả định mang tính khái quát, tổng hợp hoặc định hướng phòng ngừa/cải tiến rủi ro mà người dùng có thể sẽ hỏi dựa trên ngữ cảnh được cung cấp (Ví dụ: 'Tổng hợp các biện pháp phòng ngừa...', 'Làm sao để ngăn chặn rủi ro triển khai thủ công?')",
+    )
 
 
 class MyDocument(Document):
@@ -241,11 +368,29 @@ IGNORE_BHKN_FILES = [
     # "data/BHKN/PreMonshinApp_20250716.docx",
 ]
 
+
+CHUNK_TYPE = {
+    1: "mo_ta",
+    2: "nguyen_nhan",
+    3: "khac_phuc",
+    4: "bai_hoc",
+}
+
+
+TOPIC = {
+    1: "Mô tả chi tiết",
+    2: "Nguyên nhân gốc",
+    3: "Biện pháp khắc phục",
+    4: "Bài học rút ra",
+}
+
+
 class BaseParser:
     """BaseParser defines the interface and common functionality for parsing documents.
 
     Subclasses should implement the file_globs, and parser methods to specify how to find and parse documents.
     """
+
     def __init__(self, data_dir: Any = None) -> None:
         self._data_dir = data_dir
 
@@ -325,16 +470,21 @@ class BaseParser:
 
     def filter_files(self) -> Generator[Path, None, None]:
         """Returns a generator of file paths that match the specified glob patterns and allowed extensions.
-        
+
         Returns:
             Generator[Path, None, None]: A generator of file paths that match the criteria.
         """
         for glob in self.file_globs:
             for p in sorted(self.data_dir.rglob(glob)):
-                if p.suffix in self.allow_ext and str(p) not in [*IGNORE_HD_FILES, *IGNORE_BHKN_FILES]:
+                if p.suffix in self.allow_ext and str(p) not in [
+                    *IGNORE_HD_FILES,
+                    *IGNORE_BHKN_FILES,
+                ]:
                     yield p
 
-    def parser(self, file_path: Path) -> Generator[list[MyDocument], None, None]:
+    def parser(
+        self, file_path: Path
+    ) -> Generator[tuple[list[MyDocument], list[MyDocument]], None, None]:
         """Returns a generator of MyDocument objects containing the parsed data from the documents.
 
         Returns:
@@ -360,38 +510,35 @@ def validate_text(s: str) -> bool:
 class LessonsLearnedParser(BaseParser):
     def __init__(self, data_dir: Any = None) -> None:
         super().__init__(data_dir=data_dir)
-        self._summarize_model = OllamaLLM(
-            base_url=os.getenv("OLLAMA_BASE_URL"),
-            model=os.getenv("OLLAMA_LLM_MODEL"),
-            validate_model_on_init=False,
-            client_kwargs={"timeout": 120},
-            temperature=0.7,
-            reasoning=False,
-            num_ctx=32000,
-            num_predict=1024,
-            seed=9999,
-        )
+
+        self._add_contextual_chain = self._add_contextual()
+        self._extract_keywords_chain = self._extract_keywords()
+        self._generate_relevant_questions_chain = self._generate_relevant_questions()
 
     @property
     def file_globs(self) -> set[str]:
-        return {"BHKN/**/*.docx"}
+        return {"BHKN/**/*.docx", "BHKN/**/*.doc"}
 
     @property
     def allow_ext(self) -> set[str]:
         return {".docx", ".doc"}
 
-    def _get_body(self, file_path: Path) -> tuple[str, str | None]:
+    def _get_body(self, file_path: Path) -> tuple[str, str | None, str | None]:
         docx = docx2python(file_path, duplicate_merged_cells=False)
         occurred_at = None
+        department = None
         merged: list[str] = []
         table_header: list[Par] = []
         table_body: list[Par] = []
         for p in iter_paragraphs(docx.body_pars):
-            if not p.style:
+            if not p.style or p.style in ["Normal", "Title"]:
                 continue
 
             if len(table_header) > 0 and p.style not in ["TableHeader", "TableBody"]:
-                header: list[str] = ["".join([p.strip().replace("\n", " ") for p in row.run_strings]) for row in table_header]
+                header: list[str] = [
+                    "".join([p.strip().replace("\n", " ") for p in row.run_strings])
+                    for row in table_header
+                ]
                 spliter: list[str] = ["---" for _ in range(len(table_header))]
 
                 tbl_md = f"| {' | '.join(header)} |\n"
@@ -414,19 +561,29 @@ class LessonsLearnedParser(BaseParser):
                 table_body.append(p)
                 continue
 
+            text = " ".join(
+                [ele for ele in p.run_strings if validate_text(ele)]
+            ).strip()
+
             prefix = ""
             if p.style == "Heading1":
                 prefix = "# "
+                text = re.sub(r"(?:[IVX]+|\d+|[A-Z])\)\s*", "", text)
             elif p.style == "Heading2":
                 prefix = "## "
+                text = re.sub(r"(?:[IVX]+|\d+|[A-Z])\)\s*", "", text)
             elif p.style == "Heading3":
                 prefix = "### "
+                text = re.sub(r"(?:[IVX]+|\d+|[A-Z])\)\s*", "", text)
             elif p.style == "Heading4":
                 prefix = "#### "
+                text = re.sub(r"(?:[IVX]+|\d+|[A-Z])\)\s*", "", text)
             elif p.style == "Heading5":
                 prefix = "##### "
+                text = re.sub(r"(?:[IVX]+|\d+|[A-Z])\)\s*", "", text)
             elif p.style == "Heading6":
                 prefix = "###### "
+                text = re.sub(r"(?:[IVX]+|\d+|[A-Z])\)\s*", "", text)
             elif p.style == "ListBullet1":
                 prefix = ""
             elif p.style == "ListBullet2":
@@ -440,11 +597,17 @@ class LessonsLearnedParser(BaseParser):
             elif p.style == "ListBullet6":
                 prefix = "          "
             elif p.style == "OccurredDate":
-                matched = re.match(r".+(\d{2})\/(\d{2})\/(\d{4})", p.run_strings[0].replace(" ", ""))
+                matched = re.match(
+                    r".+(\d{2})\/(\d{2})\/(\d{4})", p.run_strings[0].replace(" ", "")
+                )
                 if matched and len(matched.groups()) == 3:
-                    occurred_at = datetime.datetime(*map(int, matched.groups()[::-1])).strftime("%Y-%m-%d")
-
-            text = " ".join([ele for ele in p.run_strings if validate_text(ele)]).strip()
+                    occurred_at = datetime.datetime(
+                        *map(int, matched.groups()[::-1])
+                    ).strftime("%Y-%m-%d")
+                continue
+            elif p.style == "Department":
+                department = p.run_strings[0].strip()
+                continue
 
             if text:
                 text = re.sub(r"\t", "", text)
@@ -455,13 +618,36 @@ class LessonsLearnedParser(BaseParser):
                 merged.append(f"{prefix}{text}")
 
         body_text = "\n\n".join(merged)
-        return body_text, occurred_at
+        return body_text, occurred_at, department
 
-    def _summarize_content(self, document: str) -> str:
-        prompt = SUMMARIZE_REPORT_PROMPT.format(document=document)
-        return self._summarize_model.invoke(prompt)
+    def _add_contextual(self):
+        return ADD_CONTEXTUAL_PROMPT | get_base_llm(temperature=0.0) | StrOutputParser()
 
-    def parser(self, file_path: Path) -> Generator[list[MyDocument], None, None]:
+    def _extract_keywords(self):
+        return (
+            dict(
+                markdown_text=RunnablePassthrough(),
+                schema=lambda x: LessonLearnedKnowledge.model_json_schema(),
+            )
+            | EXTRACT_SYSTEM_PROMPT
+            | get_base_llm(temperature=0.0).with_structured_output(
+                LessonLearnedKnowledge
+            )
+        )
+
+    def _generate_relevant_questions(self):
+        return (
+            dict(
+                context=RunnablePassthrough(),
+                schema=lambda x: RelevantQuestion.model_json_schema(),
+            )
+            | GENERATE_RELEVANT_QUESTIONS_SYSTEM_PROMPT
+            | get_base_llm(temperature=0.0).with_structured_output(RelevantQuestion)
+        )
+
+    def parser(
+        self, file_path: Path
+    ) -> Generator[tuple[list[MyDocument], list[MyDocument]], None, None]:
         logger.info(
             json.dumps(
                 {
@@ -472,52 +658,82 @@ class LessonsLearnedParser(BaseParser):
             )
         )
 
-        body_text, occurred_at = self._get_body(file_path)
-        summary = self._summarize_content(body_text)
-        print(summary)
-
         matched = re.match(r"^([a-zA-Z0-9]+)", file_path.stem)
         if not matched:
-            raise ValueError(f"File name does not match expected pattern: <project_name>_yyyymmdd, got {file_path.name}")
-        project_name = matched.group(1).lower()
-        id = str(uuid7())
-        docs: list[MyDocument] = [
-            MyDocument(
-                id=id,
-                page_content=summary,
-                metadata=dict(
-                    doc_id=id,
-                    source=file_path.name,
-                    page_number=1,
-                    doc_type="BHKN",
-                    occurred_at=occurred_at,
-                    project_name=project_name,
-                ),
+            raise ValueError(
+                f"File name does not match expected pattern: <project_name>_yyyymmdd, got {file_path.name}"
             )
-        ]
-        # extractor = MarkdownExtractor(summary)
-        # for page_number, section in enumerate(extractor.list(), 1):
-        #     id = str(uuid7())
-        #     docs.append(
-        #         MyDocument(
-        #             id=id,
-        #             page_content=extractor.get_section(section).strip(),
+
+        project_name = matched.group(1).lower()
+        body_text, occurred_at, department = self._get_body(file_path)
+        with open(file_path.with_suffix(".md"), "w", encoding="utf-8") as f:
+            f.write(body_text)
+
+        splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=[("#", "section")], strip_headers=True
+        )
+        chunks = splitter.split_text(body_text)
+        print(len(chunks))
+
+        questions: list[MyDocument] = []
+        docs: list[MyDocument] = []
+
+        contextual_prefix = self._add_contextual_chain.invoke(
+            chunks[0].page_content
+        ).strip()
+        print(len(chunks))
+
+        for i, chunk in enumerate(chunks, 1):
+            if chunk.metadata.get("section", "").find("Xem xét và đánh giá kết quả") >= 0:
+                print(f"Skipping chunk {chunk.metadata.get('section', '')}")
+                continue
+
+            chunk_id = str(uuid7())
+            content = f"{contextual_prefix} {TOPIC[i]}:\n{chunk.page_content}"
+            print(content)
+            print("-" * 80)
+            docs.append(
+                MyDocument(
+                    id=chunk_id,
+                    page_content=content,
+                    metadata=dict(
+                        doc_id=chunk_id,
+                        doc_type="BHKN",
+                        source=file_path.name,
+                        occurred_at=occurred_at,
+                        project_name=project_name,
+                        department=department,
+                        chunk_type=CHUNK_TYPE[i],
+                        page_number=i,
+                    ),
+                )
+            )
+
+        # questions: list[MyDocument] = []
+
+        # results = self._generate_relevant_questions_chain.batch(
+        #     [chunk_1.page_content, chunk_2.page_content],
+        #     config={"max_concurrency": 2},
+        # )
+
+        # for i, relevant_questions in enumerate(results):
+        #     chunk_type = "diagnostic" if i == 0 else "remediation"
+        #     for q in relevant_questions.cau_hoi:
+        #         chunk_q_id = str(uuid7())
+        #         chunk_q = MyDocument(
+        #             id=chunk_q_id,
+        #             page_content=q,
         #             metadata=dict(
-        #                 doc_id=id,
-        #                 source=file_path.name,
-        #                 page_number=page_number,
-        #                 section=section,
-        #                 doc_type="BHKN",
-        #                 occurred_at=occurred_at,
+        #                 doc_id=chunk_q_id,
+        #                 lesson_learned_id=chunk_id_2,
         #                 project_name=project_name,
+        #                 occurred_at=occurred_at,
+        #                 chunk_type=chunk_type,
         #             ),
         #         )
-        #     )
+        #         questions.append(chunk_q)
 
-        if len(docs) == 0:
-            raise ValueError(f"No valid content extracted from {file_path}")
-
-        yield docs
+        yield docs, questions
 
 
 class WorkInstructionParser(BaseParser):
@@ -547,7 +763,10 @@ class WorkInstructionParser(BaseParser):
             if not p.style:
                 continue
 
-            if len(table["headers"]) > 0 and p.style not in ["TableHeader", "TableBody"]:
+            if len(table["headers"]) > 0 and p.style not in [
+                "TableHeader",
+                "TableBody",
+            ]:
                 tbl_md = (
                     " | "
                     + " | ".join(
@@ -565,7 +784,10 @@ class WorkInstructionParser(BaseParser):
                     + "\n"
                 )
                 tbl_md += (
-                    " | " + " | ".join(["---" for _ in range(len(table["headers"]))]) + " | " + "\n"
+                    " | "
+                    + " | ".join(["---" for _ in range(len(table["headers"]))])
+                    + " | "
+                    + "\n"
                 )
                 tbl_md += "\n".join(
                     [
@@ -650,12 +872,12 @@ class WorkInstructionParser(BaseParser):
         )
 
         title = self._get_title(file_path)
-        print(title)
+        # print(title)
 
         body_text = self._get_body(file_path)
-        print(body_text)
+        # print(body_text)
 
-        print("=" * 100)
+        # print("=" * 100)
 
         yield MyDocument(
             id=str(uuid.uuid4()),
