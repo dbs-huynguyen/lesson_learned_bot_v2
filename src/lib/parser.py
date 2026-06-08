@@ -512,15 +512,16 @@ class LessonsLearnedParser(BaseParser):
         super().__init__(data_dir=data_dir)
 
         self._add_contextual_chain = self._add_contextual()
-        self._extract_keywords_chain = self._extract_keywords()
-        self._generate_relevant_questions_chain = self._generate_relevant_questions()
+        # self._generate_relevant_questions_chain = self._generate_relevant_questions()
 
     @property
     def file_globs(self) -> set[str]:
+        # return {"BHKN/**/*.md"}
         return {"BHKN/**/*.docx", "BHKN/**/*.doc"}
 
     @property
     def allow_ext(self) -> set[str]:
+        # return {".md"}
         return {".docx", ".doc"}
 
     def _get_body(self, file_path: Path) -> tuple[str, str | None, str | None]:
@@ -598,7 +599,7 @@ class LessonsLearnedParser(BaseParser):
                 prefix = "          "
             elif p.style == "OccurredDate":
                 matched = re.match(
-                    r".+(\d{2})\/(\d{2})\/(\d{4})", p.run_strings[0].replace(" ", "")
+                    r".+(\d{2})\/(\d{2})\/(\d{4})", text.replace(" ", "")
                 )
                 if matched and len(matched.groups()) == 3:
                     occurred_at = datetime.datetime(
@@ -606,8 +607,7 @@ class LessonsLearnedParser(BaseParser):
                     ).strftime("%Y-%m-%d")
                 continue
             elif p.style == "Department":
-                department = p.run_strings[0].strip()
-                continue
+                department = text
 
             if text:
                 text = re.sub(r"\t", "", text)
@@ -621,18 +621,15 @@ class LessonsLearnedParser(BaseParser):
         return body_text, occurred_at, department
 
     def _add_contextual(self):
-        return ADD_CONTEXTUAL_PROMPT | get_base_llm(temperature=0.0) | StrOutputParser()
-
-    def _extract_keywords(self):
         return (
-            dict(
-                markdown_text=RunnablePassthrough(),
-                schema=lambda x: LessonLearnedKnowledge.model_json_schema(),
+            ADD_CONTEXTUAL_PROMPT
+            | get_base_llm(
+                top_p=0.9,
+                repeat_penalty=1,
+                presence_penalty=0,
+                temperature=0.3,
             )
-            | EXTRACT_SYSTEM_PROMPT
-            | get_base_llm(temperature=0.0).with_structured_output(
-                LessonLearnedKnowledge
-            )
+            | StrOutputParser()
         )
 
     def _generate_relevant_questions(self):
@@ -642,7 +639,12 @@ class LessonsLearnedParser(BaseParser):
                 schema=lambda x: RelevantQuestion.model_json_schema(),
             )
             | GENERATE_RELEVANT_QUESTIONS_SYSTEM_PROMPT
-            | get_base_llm(temperature=0.0).with_structured_output(RelevantQuestion)
+            | get_base_llm(
+                top_p=0.9,
+                repeat_penalty=1,
+                presence_penalty=0,
+                temperature=0.3,
+            ).with_structured_output(RelevantQuestion)
         )
 
     def parser(
@@ -665,9 +667,16 @@ class LessonsLearnedParser(BaseParser):
             )
 
         project_name = matched.group(1).lower()
-        body_text, occurred_at, department = self._get_body(file_path)
-        with open(file_path.with_suffix(".md"), "w", encoding="utf-8") as f:
-            f.write(body_text)
+
+        if file_path.suffix == ".docx":
+            body_text, occurred_at, department = self._get_body(file_path)
+            with open(file_path.with_suffix(".md"), "w", encoding="utf-8") as f:
+                f.write(body_text)
+        elif file_path.suffix == ".md":
+            body_text = file_path.read_text(encoding="utf-8")
+            occurred_at, department = None, None
+        else:
+            raise ValueError(f"Unsupported file extension: {file_path.suffix}")
 
         splitter = MarkdownHeaderTextSplitter(
             headers_to_split_on=[("#", "section")], strip_headers=True
@@ -675,16 +684,20 @@ class LessonsLearnedParser(BaseParser):
         chunks = splitter.split_text(body_text)
         print(len(chunks))
 
-        questions: list[MyDocument] = []
         docs: list[MyDocument] = []
 
-        contextual_prefix = self._add_contextual_chain.invoke(
-            chunks[0].page_content
-        ).strip()
-        print(len(chunks))
+        # contextual_prefix = self._add_contextual_chain.invoke(
+        #     chunks[0].page_content
+        # ).strip()
+        contextual_prefix = ""
 
         for i, chunk in enumerate(chunks, 1):
-            if chunk.metadata.get("section", "").find("Xem xét và đánh giá kết quả") >= 0:
+            if (
+                chunk.metadata.get("section", "").find(
+                    "Xem xét và đánh giá kết quả"
+                )
+                >= 0
+            ):
                 print(f"Skipping chunk {chunk.metadata.get('section', '')}")
                 continue
 
@@ -697,7 +710,6 @@ class LessonsLearnedParser(BaseParser):
                     id=chunk_id,
                     page_content=content,
                     metadata=dict(
-                        doc_id=chunk_id,
                         doc_type="BHKN",
                         source=file_path.name,
                         occurred_at=occurred_at,
@@ -709,7 +721,7 @@ class LessonsLearnedParser(BaseParser):
                 )
             )
 
-        # questions: list[MyDocument] = []
+        questions: list[MyDocument] = []
 
         # results = self._generate_relevant_questions_chain.batch(
         #     [chunk_1.page_content, chunk_2.page_content],

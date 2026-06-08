@@ -9,6 +9,7 @@
   "image_distro": "wolfi",
   "checkpointer": {
     "serde": {
+      "allowed_msgpack_modules": true,
       "allowed_json_modules": true
     }
   }

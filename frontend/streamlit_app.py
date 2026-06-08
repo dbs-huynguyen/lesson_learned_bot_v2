@@ -339,7 +339,7 @@ if (
 
         # Khởi tạo status ban đầu
         with status_slot:
-            status = st.status("ChatDBS đang suy nghĩ...", state="running", expanded=False)
+            status = st.status("ChatDBS đang suy nghĩ...", state="running", expanded=True)
 
         try:
             stream = client.runs.stream(
@@ -368,7 +368,7 @@ if (
 
                 if chunk.event.split("|")[0] == "messages":
                     if not is_first_msg_chunk:
-                        status.update(label="Các bước suy luận", state="complete", expanded=False)
+                        status.update(label="Các bước suy luận", state="complete", expanded=True)
                         is_first_msg_chunk = True
 
                     msg, metadata = chunk.data

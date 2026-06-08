@@ -1,7 +1,16 @@
+from operator import itemgetter
 import os
+import pytz
+from datetime import datetime
 from enum import Enum
 from typing import Generic, Optional, TypeVar, Callable, Any
-from pydantic import BaseModel as PyBaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel as PyBaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 from functools import lru_cache
 
 from qdrant_client import QdrantClient
@@ -13,29 +22,24 @@ from qdrant_client.http.models import (
     MatchAny,
     DatetimeRange,
 )
-from langchain.messages import SystemMessage, RemoveMessage
+from langchain.messages import SystemMessage
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.documents import Document
 from langchain_core.rate_limiters import InMemoryRateLimiter
-from langchain_core.runnables import RunnablePassthrough, RunnableAssign
+from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_classic.output_parsers.boolean import BooleanOutputParser
-from langchain_classic.retrievers.document_compressors import LLMChainFilter
 from langchain_community.embeddings import InfinityEmbeddings
 from langchain_ollama import ChatOllama
-from langchain_openai import ChatOpenAI
-from langgraph.config import get_stream_writer
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from src.lib.reranker import MyReranker
 from src.lib.prompts import (
-    ROUTE_QUERY_STAGE_ONE_PROMPT,
+    EXTRACT_COMPLEMENT_PROMPT,
     EXTRACT_KEYWORD_PROMPT,
     EXTRACT_DATE_PROMPT,
     RETRIEVAL_DECISION_PROMPT,
-    ROUTE_QUERY_STAGE_THREE_PROMPT,
-    ROUTE_QUERY_STAGE_TWO_PROMPT,
+    ROUTE_QUERY_PROMPT,
     SUMMARY_SYSTEM_PROMPT,
     REWRITE_QUERY_PROMPT,
     GRADE_DOCS_PROMPT,
@@ -119,6 +123,10 @@ class ProjectName(str, Enum):
     ALIVE_MONITORING = "alivemonitoring"
 
 
+class ProjectNameKeyword(ListFilter[ProjectName]):
+    pass
+
+
 class ChunkType(str, Enum):
     DESCRIPTION = "mo_ta"
     ROOT_CAUSE = "nguyen_nhan"
@@ -126,18 +134,26 @@ class ChunkType(str, Enum):
     LESSON = "bai_hoc"
 
 
+class ChunkTypeKeyword(ListFilter[ChunkType]):
+    pass
+
+
 class Department(str, Enum):
-    SOFTWARE = "BP Phát triển phần mềm"
+    SOFTWARE = "Bộ phận Phát triển phần mềm"
     ISO = "Bộ phận Ban ISO"
 
 
+class DepartmentKeyword(ListFilter[Department]):
+    pass
+
+
 class ExtractionKeyword(BaseModel):
-    project_name: Optional[ListFilter[ProjectName]] = Field(
+    project_name: Optional[ProjectNameKeyword] = Field(
         default=None,
         description="Dự án được nhắc đến trong truy vấn (nếu có).",
     )
 
-    chunk_type: Optional[ListFilter[ChunkType]] = Field(
+    chunk_type: Optional[ChunkTypeKeyword] = Field(
         default=None,
         description=(
             "Phần tài liệu được nhắc đến trong truy vấn.\n"
@@ -149,7 +165,7 @@ class ExtractionKeyword(BaseModel):
         ),
     )
 
-    department: Optional[ListFilter[Department]] = Field(
+    department: Optional[DepartmentKeyword] = Field(
         default=None,
         description=(
             "Phòng ban được nhắc đến trong truy vấn (nếu có).\n"
@@ -159,23 +175,33 @@ class ExtractionKeyword(BaseModel):
         ),
     )
 
+    @field_validator("chunk_type", "project_name", "department", mode="before")
+    @classmethod
+    def coerce_string_to_list_filter(cls, v):
+        if isinstance(v, str):
+            return {"in": [v]}
+        return v
+
     @model_validator(mode="after")
     def normalize(self):
         if self.project_name and self.project_name.in_:
             self.project_name.in_ = list(map(canonicalize_value, self.project_name.in_))
 
-        return self
-
-    @model_validator(mode="after")
-    def normalize(self):
         if self.chunk_type is None:
             self.chunk_type = {"in": ["mo_ta"]}
 
+        if self.department is None:
+            self.department = {"in": ["Bộ phận Phát triển phần mềm"]}
+
         return self
 
 
+class DateKeyword(RangeFilter[str]):
+    pass
+
+
 class ExtractionDate(BaseModel):
-    occurred_at: Optional[RangeFilter[str]] = Field(
+    occurred_at: Optional[DateKeyword] = Field(
         default=None,
         description="Thời gian được đề cập trong truy vấn. Có thể là một thời điểm cụ thể hoặc một khoảng thời gian. Ví dụ: 'ngày 1/1/2025', 'tháng 1 năm 2025', 'năm 2025', hoặc 'từ ngày 1/1/2025 đến ngày 31/12/2025'.",
     )
@@ -192,6 +218,14 @@ class ExtractionDate(BaseModel):
                     )
 
         return self
+
+
+class KeywordFilter(MetadataFilter[ExtractionKeyword]):
+    pass
+
+
+class DateFilter(MetadataFilter[ExtractionDate]):
+    pass
 
 
 class GradeDoc(BaseModel):
@@ -227,7 +261,9 @@ def get_qdrant_store(collection_name: str) -> QdrantVectorStore:
 
 
 @lru_cache
-def get_reranker(top_n: Optional[int] = None, score_threshold: Optional[float] = None):
+def create_reranker(
+    top_n: Optional[int] = None, score_threshold: Optional[float] = None
+):
     return MyReranker(
         base_url=os.getenv("RERANKER_BASE_URL"),
         model=os.getenv("RERANKER_MODEL"),
@@ -270,10 +306,7 @@ def get_base_llm(**kwargs):
         seed=9999,
         num_ctx=int(os.getenv("OLLAMA_NUM_CTX")),
         reasoning=False,
-        presence_penalty=1.5,
-        temperature=1,
-        top_k=20,
-        top_p=0.95,
+        top_k=64,
     )
 
     config_with_kwargs = {**base_config, **kwargs}
@@ -282,45 +315,14 @@ def get_base_llm(**kwargs):
 
 
 @lru_cache
-def answer_agent():
+def create_question_answering_agent():
     # Lazy import to avoid slow loading at module import time
     from langchain.agents.middleware import SummarizationMiddleware
 
     class CustomSummarizationMiddleware(SummarizationMiddleware):
         pass
-        # def before_model(self, state, runtime) -> dict[str, Any] | None:
-        #     messages = state["messages"]
-        #     self._ensure_message_ids(messages)
 
-        #     total_tokens = self.token_counter(messages)
-        #     if not self._should_summarize(messages, total_tokens):
-        #         return None
-
-        #     cutoff_index = self._determine_cutoff_index(messages)
-
-        #     kind, value = self.keep
-        #     if kind == "messages":
-        #         cutoff_index -= value
-
-        #     if cutoff_index <= 0:
-        #         return None
-
-        #     messages_to_summarize, preserved_messages = self._partition_messages(
-        #         messages, cutoff_index
-        #     )
-
-        #     summary = self._create_summary(messages_to_summarize)
-        #     new_messages = self._build_new_messages(summary)
-
-        #     return {
-        #         "messages": [
-        #             RemoveMessage(id=REMOVE_ALL_MESSAGES),
-        #             *new_messages,
-        #             *preserved_messages,
-        #         ]
-        #     }
-
-    class DynamicContextMiddleware(AgentMiddleware):
+    class DynamicSystemPromptMiddleware(AgentMiddleware):
         def wrap_model_call(
             self,
             request: ModelRequest,
@@ -332,111 +334,110 @@ def answer_agent():
                 if request.system_message
                 else SystemMessage(content=ctx.get("system_prompt", ""))
             )
-            writer = get_stream_writer()
-            writer(
-                {
-                    "type": "reasoning",
-                    "message": "Hoàn tất bước suy luận, bắt đầu trả lời câu hỏi.",
-                }
-            )
             return handler(request.override(system_message=system_message))
 
     return create_agent(
-        get_base_llm(temperature=0.3, presence_penalty=0.0),
+        get_base_llm(
+            top_p=0.9,
+            repeat_penalty=1,
+            presence_penalty=0,
+            temperature=0.3,
+        ),
         middleware=[
             CustomSummarizationMiddleware(
-                get_base_llm(temperature=0.7, tags=["nostream"]),
+                get_base_llm(
+                    top_p=0.95,
+                    repeat_penalty=1,
+                    presence_penalty=0,
+                    temperature=0.5,
+                    tags=["nostream"],
+                ),
                 trigger=[("tokens", 5000)],
                 keep=("messages", 1),
                 summary_prompt=SUMMARY_SYSTEM_PROMPT,
             ),
-            DynamicContextMiddleware(),
+            DynamicSystemPromptMiddleware(),
         ],
         name=f"answer_agent",
     )
 
 
 @lru_cache
-def task_classification_1_agent():
+def create_complement_extraction_agent():
     return (
-        ROUTE_QUERY_STAGE_ONE_PROMPT
-        | get_base_llm(temperature=0.5, tags=["nostream"])
+        EXTRACT_COMPLEMENT_PROMPT
+        | get_base_llm(
+            repeat_penalty=1,
+            presence_penalty=0,
+            temperature=0.1,
+            tags=["nostream"],
+        )
         | StrOutputParser()
     )
 
 
 @lru_cache
-def task_classification_2_agent():
+def create_router_agent():
     return (
-        ROUTE_QUERY_STAGE_TWO_PROMPT
-        | get_base_llm(temperature=0.5, tags=["nostream"])
+        ROUTE_QUERY_PROMPT
+        | get_base_llm(
+            repeat_penalty=1,
+            presence_penalty=0,
+            temperature=0.3,
+            tags=["nostream"],
+        )
         | StrOutputParser()
     )
 
 
 @lru_cache
-def task_classification_3_agent():
+def create_retrieval_decision_agent():
     return (
-        ROUTE_QUERY_STAGE_THREE_PROMPT
-        | get_base_llm(temperature=0.5, tags=["nostream"])
-        | StrOutputParser()
-    )
-
-
-@lru_cache
-def decision_making_agent():
-    return (
-        {"query": RunnablePassthrough()}
-        | RETRIEVAL_DECISION_PROMPT
-        | get_base_llm(temperature=0.5, tags=["nostream"])
+        RETRIEVAL_DECISION_PROMPT
+        | get_base_llm(
+            repeat_penalty=1,
+            presence_penalty=0,
+            temperature=0.5,
+            tags=["nostream"],
+        )
         | BooleanOutputParser()
     )
 
 
 @lru_cache
-def rewrite_query_agent():
-    return (
-        {"messages": RunnablePassthrough()}
-        | REWRITE_QUERY_PROMPT
-        | get_base_llm(temperature=0.7, tags=["nostream"])
-        | StrOutputParser()
-    )
-
-
-@lru_cache
-def keyword_extraction_agent():
+def create_keyword_extraction_agent():
     return (
         dict(
-            schema=lambda x: ExtractionKeyword.model_json_schema(),
+            schema=lambda _: ExtractionKeyword.model_json_schema(),
             query=RunnablePassthrough(),
         )
         | EXTRACT_KEYWORD_PROMPT
-        | get_base_llm(temperature=0, tags=["nostream"]).with_structured_output(
-            ExtractionKeyword
-        )
+        | get_base_llm(
+            repeat_penalty=1,
+            presence_penalty=0,
+            temperature=0,
+            tags=["nostream"],
+        ).with_structured_output(ExtractionKeyword)
     )
 
 
 @lru_cache
-def date_extraction_agent():
+def create_date_extraction_agent():
     return (
         dict(
-            schema=lambda x: ExtractionDate.model_json_schema(),
-            now=RunnablePassthrough(),
+            schema=lambda _: ExtractionDate.model_json_schema(),
+            now=lambda _: datetime.now(pytz.timezone("Asia/Ho_Chi_Minh")).strftime(
+                r"%Y-%m-%d"
+            ),
             query=RunnablePassthrough(),
         )
         | EXTRACT_DATE_PROMPT
-        | get_base_llm(temperature=0, tags=["nostream"]).with_structured_output(
-            ExtractionDate
-        )
-    )
-
-
-@lru_cache
-def relevance_grading_agent():
-    return LLMChainFilter.from_llm(
-        llm=get_base_llm(temperature=0.5, tags=["nostream"]),
-        prompt=GRADE_DOCS_PROMPT,
+        | get_base_llm(
+            repeat_penalty=1,
+            presence_penalty=0,
+            temperature=0,
+            tags=["nostream"],
+        ).with_structured_output(ExtractionDate)
     )
 
 
@@ -489,48 +490,162 @@ def build_conditions(sections: list[MetadataFilter[T]]) -> list[FieldCondition]:
     return conditions
 
 
-def to_qdrant_filter(metadata_filter: MetadataFilter) -> Filter:
+def build_qdrant_filter(metadata_filter: Optional[MetadataFilter] = None) -> Filter:
+    if metadata_filter is None:
+        return Filter()
+
     return Filter(
         must=build_conditions(metadata_filter.must),
     )
 
 
-def merge_documents(
-    left: Optional[dict[str, Document]], right: Optional[dict[str, Document]]
-) -> Optional[dict[str, Document]]:
-    """Merge two document dictionaries, with right taking precedence."""
-    if left is None:
-        return right
-    if right is None:
-        return left
-    return {**left, **right}
+def merge_dicts(a: dict, b: dict) -> dict:
+    return {**a, **b}
 
 
-def build_relevant_docs_ctx(docs: list[Document]) -> tuple[str, dict[str, Document]]:
+def build_context(docs: list[Document], format: Optional[str] = None) -> str:
     if not docs:
         return "Không tìm thấy tài liệu phù hợp.", {}
 
-    xml_docs = ["<documents>"]
+    output: list[str] = []
+
+    if format == "xml":
+        output.append("<documents>")
+
     for idx, doc in enumerate(docs, 1):
         source = doc.metadata["source"]
         page = doc.metadata["page_number"]
         project = doc.metadata["project_name"]
         occurred_at = doc.metadata["occurred_at"]
 
-        open_document_tag = f'<document source="{source}" page="{page}" project_name="{project.capitalize()}" occurred_at="{occurred_at}">'
-        close_document_tag = "</document>"
+        if format == "xml":
+            output.append(
+                f'<document source="{source}" page="{page}" project_name="{project.capitalize()}" occurred_at="{occurred_at}">'
+            )
+            output.append(doc.page_content.strip())
+            output.append("</document>")
+        else:
+            output.append(
+                f"[SOURCE] {source}#page={page} - project={project.capitalize()} - occurred_at={occurred_at}  "
+            )
+            output.append(doc.page_content.strip())
+            output.append("")
 
-        xml_docs.append(open_document_tag)
-        xml_docs.append(doc.page_content.strip())
-        xml_docs.append(close_document_tag)
-    xml_docs.append("</documents>")
+    if format == "xml":
+        output.append("</documents>")
 
-    relevant_docs = "\n".join(xml_docs)
-    # print(relevant_docs)
+    return "\n".join(output)
 
-    documents = {
-        f"{doc.metadata['source']}#page={doc.metadata['page_number']}": doc
-        for doc in docs
-    }
 
-    return relevant_docs, documents
+def document_from_point(
+    scored_point: Any,
+    collection_name: str,
+    content_payload_key: str,
+    metadata_payload_key: str,
+) -> Document:
+    metadata = scored_point.payload.get(metadata_payload_key) or {}
+    metadata["_id"] = scored_point.id
+    metadata["_collection_name"] = collection_name
+    return Document(
+        page_content=scored_point.payload.get(content_payload_key, ""),
+        metadata=metadata,
+    )
+
+
+def search_for_basic(
+    query: str,
+    metadata_filter: Filter,
+    collection_name: str,
+    top_k: int,
+    score_threshold: float,
+) -> list[tuple[Document, float]]:
+    phase_one_filter = metadata_filter.model_copy(deep=True)
+    if isinstance(phase_one_filter.must, list):
+        for item in phase_one_filter.must:
+            if isinstance(item, FieldCondition) and item.key == "metadata.chunk_type":
+                item.match = MatchAny(any=["mo_ta"])
+    results = get_qdrant_store(collection_name).similarity_search_with_score(
+        query=query, filter=phase_one_filter, k=top_k, score_threshold=score_threshold
+    )
+    print("-" * 10 + " Phase 1: Similarity Search " + "-" * 10)
+    # print("Filter: " + phase_one_filter.model_dump_json(indent=2))
+    print(
+        *(
+            f"source={doc.metadata['source']}#page={doc.metadata['page_number']}: {score}"
+            for doc, score in results
+        ),
+        sep="\n",
+    )
+
+    phase_two_filter = metadata_filter.model_copy(deep=True)
+    if isinstance(phase_two_filter.must, list):
+        phase_two_filter.must.append(
+            FieldCondition(
+                key="metadata.source",
+                match=MatchAny(
+                    any=list(
+                        map(
+                            lambda x: getattr(x, "metadata")["source"],
+                            map(itemgetter(0), results),
+                        )
+                    )
+                ),
+            )
+        )
+    points = (
+        get_qdrant_store(collection_name)
+        .client.query_points(
+            collection_name=collection_name,
+            query_filter=phase_two_filter,
+            limit=top_k,
+        )
+        .points
+    )
+    results = [
+        (
+            document_from_point(result, collection_name, "page_content", "metadata"),
+            result.score,
+        )
+        for result in points
+    ]
+    print("-" * 10 + " Phase 2: Similarity Search " + "-" * 10)
+    # print("Filter: " + phase_two_filter.model_dump_json(indent=2))
+    print(
+        *(
+            f"source={doc.metadata['source']}#page={doc.metadata['page_number']}: {score}"
+            for doc, score in results
+        ),
+        sep="\n",
+    )
+
+    return results
+
+
+def search_for_others(
+    metadata_filter: Filter, collection_name: str, top_k: int
+) -> list[tuple[Document, float]]:
+    points = (
+        get_qdrant_store(collection_name)
+        .client.query_points(
+            collection_name=collection_name, query_filter=metadata_filter, limit=top_k
+        )
+        .points
+    )
+    results = [
+        (
+            document_from_point(result, collection_name, "page_content", "metadata"),
+            result.score,
+        )
+        for result in points
+    ]
+    print("-" * 10 + " Phase 1: Similarity Search " + "-" * 10)
+    # print("Filter: " + phase_two_filter.model_dump_json(indent=2))
+    print(
+        *(
+            f"source={doc.metadata['source']}#page={doc.metadata['page_number']}: {score}"
+            for doc, score in results
+        ),
+        sep="\n",
+    )
+
+    return results

@@ -24,6 +24,8 @@ from src.agent.common import (
     ExtractionDate,
     ExtractionKeyword,
     MetadataFilter,
+    KeywordFilter,
+    DateFilter,
 )
 
 
@@ -39,8 +41,8 @@ class ContextSchema(TypedDict):
 
 class StateSchema(MessagesState):
     documents: Annotated[dict[str, Document], merge_documents]
-    date_filter: Optional[MetadataFilter[ExtractionDate]]
-    keyword_filter: Optional[MetadataFilter[ExtractionKeyword]]
+    date_filter: Optional[DateFilter]
+    keyword_filter: Optional[KeywordFilter]
     metadata_filter: Optional[Filter]
     relevant_docs: str
     final_docs: Annotated[list[Document], operator.add]
@@ -49,6 +51,7 @@ class StateSchema(MessagesState):
     score_threshold: Optional[float]
     collection_name: Optional[str]
     use_reranking: Optional[bool]
+    query_retrieval: Optional[str]
 
 
 class ContextSchema(TypedDict):
@@ -87,7 +90,7 @@ def rewrite_query(state: StateSchema) -> Send:
         "rag_agent",
         dict(
             query=state["messages"][-1].content,
-            new_query=state["messages"][-1].content,
+            query_retrieval=state["query_retrieval"],
             top_k=state["top_k"],
             score_threshold=state["score_threshold"],
             collection_name=state["collection_name"],

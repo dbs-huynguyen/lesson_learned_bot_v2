@@ -1,43 +1,35 @@
-import pytz
-from datetime import datetime
 from operator import itemgetter, add
-from typing import Any, TypedDict, Optional, Annotated, Union
+from typing import TypedDict, Optional, Annotated, Union
 
-from qdrant_client.http.models import Filter
+from qdrant_client.http.models import Filter, FieldCondition, MatchAny, MatchValue
 from langchain_core.documents import Document
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph
 
 from src.agent.common import (
-    get_qdrant_store,
-    get_reranker,
-    keyword_extraction_agent,
-    date_extraction_agent,
-    to_qdrant_filter,
     ExtractionDate,
     ExtractionKeyword,
     MetadataFilter,
+    KeywordFilter,
+    DateFilter,
+    get_qdrant_store,
+    create_reranker,
+    create_keyword_extraction_agent,
+    create_date_extraction_agent,
+    build_qdrant_filter,
 )
-
-
-class InputSchema(TypedDict):
-    query: str
-    new_query: str
-    top_k: int
-    score_threshold: float
-    collection_name: str
-    use_reranking: bool
 
 
 class StateSchema(TypedDict):
     query: str
-    new_query: str
+    query_retrieval: str
     top_k: int
     score_threshold: float
     collection_name: str
     use_reranking: bool
-    keyword_filter: Optional[MetadataFilter[ExtractionKeyword]]
-    date_filter: Optional[MetadataFilter[ExtractionDate]]
+
+    keyword_filter: Optional[KeywordFilter]
+    date_filter: Optional[DateFilter]
     metadata_filter: Optional[Filter]
     retrieved_docs: list[Document]
 
@@ -46,36 +38,37 @@ class OutputSchema(TypedDict):
     final_docs: Annotated[list[Document], add]
 
 
-def extract_keyword(state: InputSchema) -> dict[str, Any]:
+def extract_keyword(state: StateSchema) -> dict:
     try:
-        output = keyword_extraction_agent().invoke(state["query"])
-        print(output)
-        keyword_filter = MetadataFilter[ExtractionKeyword](must=[output])
+        keyword_extraction_agent = create_keyword_extraction_agent()
+        result = keyword_extraction_agent.invoke(state["query"])
+        print(result)
+        keyword_filter = MetadataFilter[ExtractionKeyword](must=[result])
     except Exception as e:
         print(str(e))
         keyword_filter = None
 
-    return {"keyword_filter": keyword_filter}
+    updated = dict(keyword_filter=keyword_filter)
+
+    return updated
 
 
-def extract_date(state: InputSchema) -> dict[str, Any]:
+def extract_date(state: StateSchema) -> dict:
     try:
-        output = date_extraction_agent().invoke(
-            dict(
-                query=state["query"],
-                now=datetime.now(tz=pytz.timezone("Asia/Ho_Chi_Minh")).strftime("%Y-%m-%d"),
-            )
-        )
-        print(output)
-        date_filter = MetadataFilter[ExtractionDate](must=[output])
+        date_extraction_agent = create_date_extraction_agent()
+        result = date_extraction_agent.invoke(state["query"])
+        print(result)
+        date_filter = MetadataFilter[ExtractionDate](must=[result])
     except Exception as e:
         print(str(e))
         date_filter = None
 
-    return {"date_filter": date_filter}
+    updated = dict(date_filter=date_filter)
+
+    return updated
 
 
-def combine_filter(state: StateSchema) -> dict[str, Any]:
+def build_metadata_filter(state: StateSchema) -> dict:
     if state["date_filter"] and state["keyword_filter"]:
         metadata_filter = MetadataFilter[Union[ExtractionKeyword, ExtractionDate]](
             must=state["keyword_filter"].must + state["date_filter"].must
@@ -88,37 +81,151 @@ def combine_filter(state: StateSchema) -> dict[str, Any]:
         metadata_filter = None
 
     if metadata_filter is not None:
-        metadata_filter = to_qdrant_filter(metadata_filter)
+        metadata_filter = build_qdrant_filter(metadata_filter)
 
-    return {"metadata_filter": metadata_filter}
+    updated = dict(metadata_filter=metadata_filter)
+
+    return updated
 
 
-def hybrid_search(state: StateSchema) -> dict[str, Any]:
-    print(state["metadata_filter"].model_dump_json(indent=2))
+def hybrid_search(state: StateSchema) -> dict:
+    print(f"Query for retrieval: {state['query_retrieval']}")
+    print("Original Filter: " + state["metadata_filter"].model_dump_json(indent=2))
+
+    print("-" * 10 + " Phase 1: Similarity Search Results " + "-" * 10)
+    phase_one_filter = state["metadata_filter"].model_copy(deep=True)
+    if isinstance(phase_one_filter.must, list):
+        for item in phase_one_filter.must:
+            if isinstance(item, FieldCondition) and item.key == "metadata.chunk_type":
+                item.match = MatchValue(value="mo_ta")
+    print("Phase 1 Filter: " + phase_one_filter.model_dump_json(indent=2))
     results = get_qdrant_store(state["collection_name"]).similarity_search_with_score(
-        query=state["new_query"],
+        query=state["query_retrieval"],
+        filter=phase_one_filter,
         k=state["top_k"],
-        filter=state["metadata_filter"],
         score_threshold=state["score_threshold"],
     )
-    print("========== Search Results ==========")
-    if state["collection_name"] == "questions":
-        print(
-            *(f"{doc.metadata['doc_id']}: {score}" for doc, score in results), sep="\n"
+    print(
+        *(
+            f"{doc.metadata['source']}#{doc.metadata['page_number']}: {score}"
+            for doc, score in results
+        ),
+        sep="\n",
+    )
+
+    print("-" * 10 + " Phase 2: Similarity Search Results " + "-" * 10)
+    phase_two_filter = state["metadata_filter"].model_copy(deep=True)
+    if isinstance(phase_two_filter.must, list):
+        phase_two_filter.must.append(
+            FieldCondition(
+                key="metadata.source",
+                match=MatchAny(
+                    any=list(
+                        map(
+                            lambda x: getattr(x, "metadata")["source"],
+                            map(itemgetter(0), results),
+                        )
+                    )
+                ),
+            )
         )
-    else:
-        print(
-            *(
-                f"{doc.metadata['source']}#{doc.metadata['page_number']}: {score}"
-                for doc, score in results
-            ),
-            sep="\n",
-        )
+    print("Filter with source: " + phase_two_filter.model_dump_json(indent=2))
+    results = get_qdrant_store(state["collection_name"]).client.query_points(
+        collection_name=state["collection_name"],
+        query_filter=phase_two_filter,
+        limit=state["top_k"],
+    )
+    print(results.points)
+    # print(
+    #     *(
+    #         f"{doc.metadata['source']}#{doc.metadata['page_number']}: {score}"
+    #         for doc, score in results
+    #     ),
+    #     sep="\n",
+    # )
 
-    return {"retrieved_docs": list(map(itemgetter(0), results))}
+    # from langchain_qdrant import QdrantVectorStore, RetrievalMode, FastEmbedSparse
+    # from langchain_classic.retrievers import EnsembleRetriever
+
+    # dense_retriever = QdrantVectorStore.from_existing_collection(
+    #     embedding=get_embeddings(),
+    #     collection_name=state["collection_name"],
+    #     vector_name="dense",
+    #     retrieval_mode=RetrievalMode.DENSE,
+    #     url="http://192.168.88.179:6333",
+    # ).as_retriever(
+    #     search_kwargs={
+    #         "k": state["top_k"],
+    #         # "filter": state["metadata_filter"],
+    #         "filter": Filter(
+    #             must=[
+    #                 FieldCondition(
+    #                     key="metadata.chunk_type",
+    #                     match=MatchAny(any=["mo_ta"]),
+    #                 ),
+    #                 FieldCondition(
+    #                     key="metadata.department",
+    #                     match=MatchAny(any=["BP Phát triển phần mềm"]),
+    #                 ),
+    #             ]
+    #         ),
+    #         "score_threshold": state["score_threshold"],
+    #     }
+    # )
+
+    # sparse_retriever = QdrantVectorStore.from_existing_collection(
+    #     sparse_embedding=FastEmbedSparse(),
+    #     collection_name=state["collection_name"],
+    #     sparse_vector_name="sparse",
+    #     retrieval_mode=RetrievalMode.SPARSE,
+    #     url="http://192.168.88.179:6333",
+    # ).as_retriever(
+    #     search_kwargs={
+    #         "k": state["top_k"],
+    #         # "filter": state["metadata_filter"],
+    #         "filter": Filter(
+    #             must=[
+    #                 FieldCondition(
+    #                     key="metadata.chunk_type",
+    #                     match=MatchAny(any=["mo_ta"]),
+    #                 ),
+    #                 FieldCondition(
+    #                     key="metadata.department",
+    #                     match=MatchAny(any=["BP Phát triển phần mềm"]),
+    #                 ),
+    #             ]
+    #         ),
+    #         # "score_threshold": 6.0,
+    #     }
+    # )
+
+    # hybrid_retriever = EnsembleRetriever(
+    #     retrievers=[dense_retriever, sparse_retriever],
+    #     weights=[0.8, 0.2],
+    #     id_key="_id",
+    # )
+    # docs = hybrid_retriever.invoke(state["query_retrieval"])
+    # return {"retrieved_docs": docs}
+
+    # if state["collection_name"] == "questions":
+    #     print(
+    #         *(f"{doc.metadata['doc_id']}: {score}" for doc, score in results), sep="\n"
+    #     )
+    # else:
+    #     print(
+    #         *(
+    #             f"{doc.metadata['source']}#{doc.metadata['page_number']}: {score}"
+    #             for doc, score in results
+    #         ),
+    #         sep="\n",
+    #     )
+
+    updated = dict(retrieved_docs=list(map(itemgetter(0), results)))
+
+    return updated
 
 
-def rerank_docs(state: StateSchema) -> dict[str, Any]:
+def rerank_docs(state: StateSchema) -> dict:
     if state["collection_name"] == "lessons_learned":
         retrieved_docs = state["retrieved_docs"]
     else:
@@ -140,9 +247,9 @@ def rerank_docs(state: StateSchema) -> dict[str, Any]:
         )
 
     if state["use_reranking"]:
-        reranker = get_reranker()
+        reranker = create_reranker()
         results = reranker.compress_documents_with_score(
-            retrieved_docs, state["new_query"]
+            retrieved_docs, state["query_retrieval"]
         )
         print("========== Reranked Results ==========")
         print(
@@ -158,34 +265,32 @@ def rerank_docs(state: StateSchema) -> dict[str, Any]:
 
     writer = get_stream_writer()
     writer(
-        {
-            "type": "reasoning",
-            "message": "Sắp xếp {} tài liệu theo mức độ liên quan.".format(len(docs)),
-        }
+        dict(
+            type="reasoning",
+            message="Sắp xếp {} tài liệu theo mức độ liên quan.".format(len(docs)),
+        )
     )
 
-    return {"final_docs": docs}
+    updated = dict(final_docs=docs)
+
+    return updated
 
 
 # Define the graph
 graph = (
-    StateGraph(
-        state_schema=StateSchema,
-        input_schema=InputSchema,
-        output_schema=OutputSchema,
-    )
+    StateGraph(state_schema=StateSchema, output_schema=OutputSchema)
     # define nodes
     .add_node("extract_keyword", extract_keyword)
     .add_node("extract_date", extract_date)
-    .add_node("combine_filter", combine_filter)
+    .add_node("build_metadata_filter", build_metadata_filter)
     .add_node("hybrid_search", hybrid_search)
     .add_node("rerank_docs", rerank_docs)
     # define workflow
     .set_entry_point("extract_keyword")
     .set_entry_point("extract_date")
-    .add_edge("extract_keyword", "combine_filter")
-    .add_edge("extract_date", "combine_filter")
-    .add_edge("combine_filter", "hybrid_search")
+    .add_edge("merge", "build_metadata_filter")
+    .add_edge("extract_date", "build_metadata_filter")
+    .add_edge("build_metadata_filter", "hybrid_search")
     .add_edge("hybrid_search", "rerank_docs")
     .set_finish_point("rerank_docs")
     # compile the graph
