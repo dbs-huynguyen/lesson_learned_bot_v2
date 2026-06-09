@@ -13,6 +13,8 @@ from pydantic import (
 )
 from functools import lru_cache
 
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, JSON, Text
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from qdrant_client import QdrantClient
 from langchain_qdrant import QdrantVectorStore, RetrievalMode
 from qdrant_client.http.models import (
@@ -41,8 +43,6 @@ from src.lib.prompts import (
     RETRIEVAL_DECISION_PROMPT,
     ROUTE_QUERY_PROMPT,
     SUMMARY_SYSTEM_PROMPT,
-    REWRITE_QUERY_PROMPT,
-    GRADE_DOCS_PROMPT,
 )
 from src.lib.utils import canonicalize_value, canonicalize_date
 
@@ -439,6 +439,30 @@ def create_date_extraction_agent():
             tags=["nostream"],
         ).with_structured_output(ExtractionDate)
     )
+
+
+Base = declarative_base()
+
+
+class QuestionModel(Base):
+    __tablename__ = "questions"
+
+    id = Column(String, primary_key=True)
+    question = Column(Text, nullable=False)
+    answer = Column(String, nullable=False)
+    sources = Column(String)
+
+    def __repr__(self):
+        return f"<QuestionModel(id={self.id}, question={self.question}, answer={self.answer}, sources={self.sources})>"
+
+
+@lru_cache
+def create_session_maker() -> Session:
+    # Tạo engine và session
+    engine = create_engine(f"sqlite:///{os.getenv("SQLITE_DB_NAME")}", echo=False)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    return Session()
 
 
 def build_field_condition(

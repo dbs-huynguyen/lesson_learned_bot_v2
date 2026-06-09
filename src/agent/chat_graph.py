@@ -38,9 +38,9 @@ from src.agent.common import (
 
 SYSTEM_PROMPT = {
     "basic_agent": BASIC_SYSTEM_PROMPT,
-    "trend_agent": BASIC_SYSTEM_PROMPT,
+    "trend_agent": TREND_SYSTEM_PROMPT,
     "statistics_agent": BASIC_SYSTEM_PROMPT,
-    "classification_agent": BASIC_SYSTEM_PROMPT,
+    "classification_agent": CLASSIFICATION_SYSTEM_PROMPT,
 }
 
 
@@ -107,11 +107,10 @@ def prepare_thread(state: InputSchema) -> dict:
 def should_retrieve(
     state: StateSchema,
 ) -> Literal["extract_keyword", "extract_date", "answer_directly"]:
-    # retrieval_decision_agent = create_retrieval_decision_agent()
+    retrieval_decision_agent = create_retrieval_decision_agent()
 
-    # should_retrieve = retrieval_decision_agent.invoke(state["messages"][-1].content)
-    # print(f"Should retrieve: {should_retrieve}")
-    should_retrieve = True
+    should_retrieve = retrieval_decision_agent.invoke(state["messages"][-1].content)
+    print(f"Should retrieve: {should_retrieve}")
     if should_retrieve:
         return ["extract_keyword", "extract_date"]
     else:

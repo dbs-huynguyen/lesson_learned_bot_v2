@@ -175,9 +175,9 @@ def get_qdrant_store(collection_name: str) -> QdrantVectorStore:
     )
 
 
-def create_session_maker(db_path: str) -> Session:
+def create_session_maker() -> Session:
     # Tạo engine và session
-    engine = create_engine(f"sqlite:///{db_path}", echo=False)
+    engine = create_engine(f"sqlite:///{os.getenv("SQLITE_DB_NAME")}", echo=False)
     # Xóa tất cả bảng cũ trước khi tạo lại
     LessonLearnedModel.__table__.drop(engine, checkfirst=True)
     QuestionModel.__table__.drop(engine, checkfirst=True)
@@ -420,7 +420,7 @@ def save_to_markdown(documents: list[MyDocument], output_dir: str) -> None:
     )
 
 
-def main(data_dir: Path, storage_type: str, db_path: str, markdown_dir: str):
+def main(data_dir: Path, storage_type: str, markdown_dir: str):
     logger.info(
         json.dumps(
             {
@@ -437,7 +437,7 @@ def main(data_dir: Path, storage_type: str, db_path: str, markdown_dir: str):
 
     lessons_learned_store = create_lessons_learned_collection()
     questions_store = create_questions_collection()
-    session = create_session_maker(db_path)
+    session = create_session_maker()
 
     # documents = list(chain.from_iterable(parser()))
     total_docs = 0
@@ -484,12 +484,6 @@ if __name__ == "__main__":
         help="Storage type: qdrant (vector DB), sqlite (relational DB), markdown (markdown files), both (qdrant+sqlite), or all (all types, default: qdrant)",
     )
     args_parser.add_argument(
-        "--db-path",
-        type=str,
-        default="lessons_learned.db",
-        help="Path to the SQLite database file (default: lessons_learned.db)",
-    )
-    args_parser.add_argument(
         "--markdown-dir",
         type=str,
         default="output_md",
@@ -497,4 +491,4 @@ if __name__ == "__main__":
     )
     args = args_parser.parse_args()
 
-    main(args.data_dir, args.storage_type, args.db_path, args.markdown_dir)
+    main(args.data_dir, args.storage_type, args.markdown_dir)

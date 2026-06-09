@@ -1,6 +1,8 @@
 {
   "$schema": "https://langgra.ph/schema.json",
-  "dependencies": ["."],
+  "dependencies": [
+    "."
+  ],
   "graphs": {
     "chat": "./src/agent/chat_graph.py:graph",
     "list_files": "./src/agent/list_files_graph.py:graph"
@@ -9,8 +11,20 @@
   "image_distro": "wolfi",
   "checkpointer": {
     "serde": {
-      "allowed_msgpack_modules": true,
-      "allowed_json_modules": true
+      "allowed_msgpack_modules": [
+        [
+          "src.agent.common",
+          "KeywordFilter"
+        ],
+        [
+          "src.agent.common",
+          "DateFilter"
+        ],
+        [
+          "qdrant_client.http.models.models",
+          "Filter"
+        ]
+      ]
     }
   }
 }

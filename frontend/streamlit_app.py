@@ -11,7 +11,7 @@ st.set_page_config(
     page_title="InsightBot – Bài Học & Kinh Nghiệm",
     page_icon="🤖",
     initial_sidebar_state=st.session_state.get("sidebar_state", "auto"),
-    layout="centered",
+    layout="wide",
 )
 
 
