@@ -74,7 +74,7 @@ Example:
 - Query: Phân loại sự cố trong năm 2025, sau đó sắp xếp theo tần suất xảy ra từ cao đến thấp. -> Keyword: phân loại, tần suất -> classification_agent (vì trọng số của phân loại cao hơn thống kê)
 
 ONLY returns the group name, without explaining or adding any other information.
-                                                      
+
 STEP-BY-STEP REASONING:
 """.strip())
 
@@ -87,7 +87,7 @@ QUERY:
 
 Think through this step-by-step:
 1. First, read the user's query carefully
-2. Extract which keywords of the query are relevant to the following topics: 'quy trình', 'sự cố', 'lỗi', 'giải pháp', 'rủi ro', 'bài học', 'kinh nghiệm'
+2. Extract which keywords of the query are relevant to the following topics: 'quy trình', 'sự cố', 'lỗi', 'vấn đề', 'giải pháp', 'rủi ro', 'bài học', 'kinh nghiệm'
 3. Consider if there are relevant keywords, answer YES. If there are no relevant keywords, answer NO
 
 Example:
