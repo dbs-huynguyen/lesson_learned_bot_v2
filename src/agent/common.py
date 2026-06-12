@@ -1,19 +1,18 @@
-from operator import itemgetter
 import os
 import pytz
-from datetime import datetime
+import typing as t
 from enum import Enum
-from typing import Generic, Optional, TypeVar, Callable, Any
+from datetime import datetime
+from functools import lru_cache
 from pydantic import (
-    BaseModel as PyBaseModel,
+    BaseModel,
     ConfigDict,
     Field,
     field_validator,
     model_validator,
 )
-from functools import lru_cache
 
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, JSON, Text
+from sqlalchemy import create_engine, Column, String, Text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from qdrant_client import QdrantClient
 from langchain_qdrant import QdrantVectorStore, RetrievalMode
@@ -46,63 +45,6 @@ from src.lib.prompts import (
 )
 from src.lib.utils import canonicalize_value, canonicalize_date
 
-T = TypeVar("T")
-
-
-class BaseModel(PyBaseModel):
-    model_config = ConfigDict(
-        validate_assignment=True,
-        use_enum_values=True,
-    )
-
-
-class ScalarFilter(BaseModel, Generic[T]):
-    eq: Optional[T] = None
-
-
-class ListFilter(BaseModel, Generic[T]):
-    in_: Optional[list[T]] = Field(default=None, alias="in")
-
-
-class RangeFilter(BaseModel, Generic[T]):
-    gt: Optional[T] = None
-    gte: Optional[T] = None
-    lt: Optional[T] = None
-    lte: Optional[T] = None
-
-
-class FieldFilter(ScalarFilter, ListFilter, RangeFilter, Generic[T]):
-    pass
-
-
-class MetadataFilter(BaseModel, Generic[T]):
-    must: Optional[list[T]] = None
-
-
-class AgentType(str, Enum):
-    TREND = "trend_agent"
-    CLASSIFICATION = "classification_agent"
-    STATISTICS = "statistics_agent"
-    BASIC = "basic_agent"
-
-
-class AgentClassification(BaseModel):
-    # agent: AgentType = Field(
-    #     AgentType.BASIC,
-    #     description=("The name of the sub-agent to route the query to."),
-    # )
-    intent: str = Field(
-        default=None,
-        description=(
-            "Phân loại ý định của người dùng.\n"
-            "Chỉ chọn 1 trong: 'CHI_TIET' hoặc 'TONG_HOP'"
-        ),
-    )
-    complement: str = Field(
-        default=None,
-        description="Phần bổ ngữ đã được xác định hoặc rỗng.",
-    )
-
 
 class ProjectName(str, Enum):
     AUTH = "auth"
@@ -123,19 +65,11 @@ class ProjectName(str, Enum):
     ALIVE_MONITORING = "alivemonitoring"
 
 
-class ProjectNameKeyword(ListFilter[ProjectName]):
-    pass
-
-
 class ChunkType(str, Enum):
-    DESCRIPTION = "mo_ta"
+    # DESCRIPTION = "mo_ta"
     ROOT_CAUSE = "nguyen_nhan"
     SOLUTION = "khac_phuc"
     LESSON = "bai_hoc"
-
-
-class ChunkTypeKeyword(ListFilter[ChunkType]):
-    pass
 
 
 class Department(str, Enum):
@@ -143,17 +77,37 @@ class Department(str, Enum):
     ISO = "Bộ phận Ban ISO"
 
 
-class DepartmentKeyword(ListFilter[Department]):
-    pass
+T = t.TypeVar("T")
+
+
+class ScalarFilter(BaseModel, t.Generic[T]):
+    model_config = ConfigDict(use_enum_values=True)
+
+    eq: t.Optional[T] = Field(default=None)
+
+
+class ListFilter(BaseModel, t.Generic[T]):
+    model_config = ConfigDict(use_enum_values=True)
+
+    in_: t.Optional[list[T]] = Field(default=None, alias="in")
+
+
+class RangeFilter(BaseModel, t.Generic[T]):
+    model_config = ConfigDict(use_enum_values=True)
+
+    gt: t.Optional[T] = Field(default=None)
+    gte: t.Optional[T] = Field(default=None)
+    lt: t.Optional[T] = Field(default=None)
+    lte: t.Optional[T] = Field(default=None)
 
 
 class ExtractionKeyword(BaseModel):
-    project_name: Optional[ProjectNameKeyword] = Field(
+    project_name: t.Optional[ListFilter[ProjectName]] = Field(
         default=None,
         description="Dự án được nhắc đến trong truy vấn (nếu có).",
     )
 
-    chunk_type: Optional[ChunkTypeKeyword] = Field(
+    chunk_type: t.Optional[ListFilter[ChunkType]] = Field(
         default=None,
         description=(
             "Phần tài liệu được nhắc đến trong truy vấn.\n"
@@ -165,17 +119,7 @@ class ExtractionKeyword(BaseModel):
         ),
     )
 
-    department: Optional[DepartmentKeyword] = Field(
-        default=None,
-        description=(
-            "Phòng ban được nhắc đến trong truy vấn (nếu có).\n"
-            "Ví dụ:\n"
-            "- 'phòng phát triển phần mềm', 'bộ phận phát triển phần mềm', 'team phát triển phần mềm',... -> BP Phát triển phần mềm\n"
-            "- 'bộ phận ISO', 'phòng ISO', 'team ISO',... -> Bộ phận Ban ISO"
-        ),
-    )
-
-    @field_validator("chunk_type", "project_name", "department", mode="before")
+    @field_validator("chunk_type", "project_name", mode="before")
     @classmethod
     def coerce_string_to_list_filter(cls, v):
         if isinstance(v, str):
@@ -187,21 +131,11 @@ class ExtractionKeyword(BaseModel):
         if self.project_name and self.project_name.in_:
             self.project_name.in_ = list(map(canonicalize_value, self.project_name.in_))
 
-        if self.chunk_type is None:
-            self.chunk_type = {"in": ["mo_ta"]}
-
-        if self.department is None:
-            self.department = {"in": ["Bộ phận Phát triển phần mềm"]}
-
         return self
 
 
-class DateKeyword(RangeFilter[str]):
-    pass
-
-
 class ExtractionDate(BaseModel):
-    occurred_at: Optional[DateKeyword] = Field(
+    occurred_at: t.Optional[RangeFilter[str]] = Field(
         default=None,
         description="Thời gian được đề cập trong truy vấn. Có thể là một thời điểm cụ thể hoặc một khoảng thời gian. Ví dụ: 'ngày 1/1/2025', 'tháng 1 năm 2025', 'năm 2025', hoặc 'từ ngày 1/1/2025 đến ngày 31/12/2025'.",
     )
@@ -220,18 +154,15 @@ class ExtractionDate(BaseModel):
         return self
 
 
-class KeywordFilter(MetadataFilter[ExtractionKeyword]):
-    pass
+class MetadataFilter(BaseModel):
+    must: t.Optional[list[t.Union[ExtractionKeyword, ExtractionDate]]] = Field(default_factory=list)
 
+    def __add__(self, other):
+        if not isinstance(other, MetadataFilter):
+            return NotImplemented
 
-class DateFilter(MetadataFilter[ExtractionDate]):
-    pass
-
-
-class GradeDoc(BaseModel):
-    relevant: bool = Field(
-        description="Whether the document is relevant to the query.",
-    )
+        combined_must = (self.must or []) + (other.must or [])
+        return MetadataFilter(must=combined_must)
 
 
 @lru_cache
@@ -262,7 +193,7 @@ def get_qdrant_store(collection_name: str) -> QdrantVectorStore:
 
 @lru_cache
 def create_reranker(
-    top_n: Optional[int] = None, score_threshold: Optional[float] = None
+    top_n: t.Optional[int] = None, score_threshold: t.Optional[float] = None
 ):
     return MyReranker(
         base_url=os.getenv("RERANKER_BASE_URL"),
@@ -326,7 +257,7 @@ def create_question_answering_agent():
         def wrap_model_call(
             self,
             request: ModelRequest,
-            handler: Callable[[ModelRequest], ModelResponse],
+            handler: t.Callable[[ModelRequest], ModelResponse],
         ) -> ModelResponse:
             ctx = request.runtime.context or {}
             system_message = (
@@ -465,20 +396,19 @@ def create_session_maker() -> Session:
     return Session()
 
 
-def build_field_condition(
-    field_name: str, field_filter: FieldFilter
-) -> Optional[FieldCondition]:
-    data = field_filter.model_dump(by_alias=True, exclude_none=True)
+def build_field_condition(key: str, value: t.Union[ScalarFilter, ListFilter, RangeFilter]) -> t.Optional[FieldCondition]:
+    data = value.model_dump(by_alias=True, exclude_none=True)
+    prefix_key = "metadata"
 
     if "eq" in data:
         return FieldCondition(
-            key=f"metadata.{field_name}",
+            key=f"{prefix_key}.{key}",
             match=MatchValue(value=data["eq"]),
         )
 
     if "in" in data:
         return FieldCondition(
-            key=f"metadata.{field_name}",
+            key=f"{prefix_key}.{key}",
             match=MatchAny(any=data["in"]),
         )
 
@@ -490,46 +420,37 @@ def build_field_condition(
 
     if range_ops:
         return FieldCondition(
-            key=f"metadata.{field_name}",
+            key=f"{prefix_key}.{key}",
             range=DatetimeRange(**range_ops),
         )
 
     return None
 
 
-def build_conditions(sections: list[MetadataFilter[T]]) -> list[FieldCondition]:
-    if sections is None:
-        return []
-
-    conditions: list[FieldCondition] = []
+def build_conditions(sections: list[t.Union[ExtractionKeyword, ExtractionDate]]) -> list[FieldCondition]:
+    conditions = []
     for section in sections:
         for field_name in section.model_dump(exclude_none=True).keys():
             filter_obj = getattr(section, field_name)
 
-            condition = build_field_condition(field_name, filter_obj)
-
-            if condition:
+            if condition := build_field_condition(field_name, filter_obj):
                 conditions.append(condition)
 
     return conditions
 
 
-def build_qdrant_filter(metadata_filter: Optional[MetadataFilter] = None) -> Filter:
-    if metadata_filter is None:
-        return Filter()
-
-    return Filter(
-        must=build_conditions(metadata_filter.must),
-    )
+def build_qdrant_filter(filter: t.Optional[MetadataFilter] = None) -> Filter:
+    sections = getattr(filter, "must", []) if filter else []
+    return Filter(must=build_conditions(sections))
 
 
 def merge_dicts(a: dict, b: dict) -> dict:
     return {**a, **b}
 
 
-def build_context(docs: list[Document], format: Optional[str] = None) -> str:
+def build_context(docs: list[Document], format: t.Optional[str] = None) -> str:
     if not docs:
-        return "Không tìm thấy tài liệu phù hợp.", {}
+        return "Không tìm thấy tài liệu phù hợp."
 
     output: list[str] = []
 
@@ -550,7 +471,7 @@ def build_context(docs: list[Document], format: Optional[str] = None) -> str:
             output.append("</document>")
         else:
             output.append(
-                f"[SOURCE] {source}#page={page} - project={project.capitalize()} - occurred_at={occurred_at}  "
+                f"[SOURCE] {source}#page={page} - project={project.capitalize()} - occurred_at={occurred_at}"
             )
             output.append(doc.page_content.strip())
             output.append("")
@@ -562,7 +483,7 @@ def build_context(docs: list[Document], format: Optional[str] = None) -> str:
 
 
 def document_from_point(
-    scored_point: Any,
+    scored_point: t.Any,
     collection_name: str,
     content_payload_key: str,
     metadata_payload_key: str,
@@ -578,20 +499,20 @@ def document_from_point(
 
 def search_for_basic(
     query: str,
-    metadata_filter: Filter,
+    filter: Filter,
     collection_name: str,
     top_k: int,
     score_threshold: float,
 ) -> list[tuple[Document, float]]:
-    phase_one_filter = metadata_filter.model_copy(deep=True)
-    if isinstance(phase_one_filter.must, list):
-        for item in phase_one_filter.must:
-            if isinstance(item, FieldCondition) and item.key == "metadata.chunk_type":
-                item.match = MatchAny(any=["mo_ta"])
+    # phase_one_filter = filter.model_copy(deep=True)
+    # if isinstance(phase_one_filter.must, list):
+    #     for item in phase_one_filter.must:
+    #         if isinstance(item, FieldCondition) and item.key == "metadata.chunk_type":
+    #             item.match = MatchAny(any=["mo_ta"])
     results = get_qdrant_store(collection_name).similarity_search_with_score(
-        query=query, filter=phase_one_filter, k=top_k, score_threshold=score_threshold
+        query=query, filter=filter, k=top_k, score_threshold=score_threshold
     )
-    print("-" * 10 + " Phase 1: Similarity Search " + "-" * 10)
+    # print("-" * 10 + " Phase 1: Similarity Search " + "-" * 10)
     # print("Filter: " + phase_one_filter.model_dump_json(indent=2))
     print(
         *(
@@ -601,57 +522,57 @@ def search_for_basic(
         sep="\n",
     )
 
-    phase_two_filter = metadata_filter.model_copy(deep=True)
-    if isinstance(phase_two_filter.must, list):
-        phase_two_filter.must.append(
-            FieldCondition(
-                key="metadata.source",
-                match=MatchAny(
-                    any=list(
-                        map(
-                            lambda x: getattr(x, "metadata")["source"],
-                            map(itemgetter(0), results),
-                        )
-                    )
-                ),
-            )
-        )
-    points = (
-        get_qdrant_store(collection_name)
-        .client.query_points(
-            collection_name=collection_name,
-            query_filter=phase_two_filter,
-            limit=top_k,
-        )
-        .points
-    )
-    results = [
-        (
-            document_from_point(result, collection_name, "page_content", "metadata"),
-            result.score,
-        )
-        for result in points
-    ]
-    print("-" * 10 + " Phase 2: Similarity Search " + "-" * 10)
-    # print("Filter: " + phase_two_filter.model_dump_json(indent=2))
-    print(
-        *(
-            f"source={doc.metadata['source']}#page={doc.metadata['page_number']}: {score}"
-            for doc, score in results
-        ),
-        sep="\n",
-    )
+    # phase_two_filter = filter.model_copy(deep=True)
+    # if isinstance(phase_two_filter.must, list):
+    #     phase_two_filter.must.append(
+    #         FieldCondition(
+    #             key="metadata.source",
+    #             match=MatchAny(
+    #                 any=list(
+    #                     map(
+    #                         lambda x: getattr(x, "metadata")["source"],
+    #                         map(itemgetter(0), results),
+    #                     )
+    #                 )
+    #             ),
+    #         )
+    #     )
+    # points = (
+    #     get_qdrant_store(collection_name)
+    #     .client.query_points(
+    #         collection_name=collection_name,
+    #         query_filter=phase_two_filter,
+    #         limit=top_k,
+    #     )
+    #     .points
+    # )
+    # results = [
+    #     (
+    #         document_from_point(result, collection_name, "page_content", "metadata"),
+    #         result.score,
+    #     )
+    #     for result in points
+    # ]
+    # print("-" * 10 + " Phase 2: Similarity Search " + "-" * 10)
+    # # print("Filter: " + phase_two_filter.model_dump_json(indent=2))
+    # print(
+    #     *(
+    #         f"source={doc.metadata['source']}#page={doc.metadata['page_number']}: {score}"
+    #         for doc, score in results
+    #     ),
+    #     sep="\n",
+    # )
 
     return results
 
 
 def search_for_others(
-    metadata_filter: Filter, collection_name: str, top_k: int
+    filter: Filter, collection_name: str, top_k: int
 ) -> list[tuple[Document, float]]:
     points = (
         get_qdrant_store(collection_name)
         .client.query_points(
-            collection_name=collection_name, query_filter=metadata_filter, limit=top_k
+            collection_name=collection_name, query_filter=filter, limit=top_k
         )
         .points
     )
@@ -662,8 +583,8 @@ def search_for_others(
         )
         for result in points
     ]
-    print("-" * 10 + " Phase 1: Similarity Search " + "-" * 10)
-    # print("Filter: " + phase_two_filter.model_dump_json(indent=2))
+    # print("-" * 10 + " Phase 1: Similarity Search " + "-" * 10)
+    # print("Filter: " + filter.model_dump_json(indent=2))
     print(
         *(
             f"source={doc.metadata['source']}#page={doc.metadata['page_number']}: {score}"

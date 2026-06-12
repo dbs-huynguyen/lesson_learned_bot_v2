@@ -1,24 +1,15 @@
-from operator import add, itemgetter
-from typing import Literal, Annotated, TypedDict, Union, Optional
+import typing as t
+from operator import itemgetter
 
+from qdrant_client.models import Filter
+from langchain.messages import AnyMessage
 from langchain_core.documents import Document
-from langchain.messages import AIMessage, HumanMessage, AnyMessage
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, add_messages
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
 
-from src.lib.prompts import (
-    BASIC_SYSTEM_PROMPT,
-    TREND_SYSTEM_PROMPT,
-    CLASSIFICATION_SYSTEM_PROMPT,
-    STATISTICS_SYSTEM_PROMPT,
-)
+from src.lib.prompts import SYSTEM_PROMPT
 from src.agent.common import (
     MetadataFilter,
-    KeywordFilter,
-    DateFilter,
-    ExtractionKeyword,
-    ExtractionDate,
     get_base_llm,
     build_qdrant_filter,
     create_complement_extraction_agent,
@@ -29,24 +20,17 @@ from src.agent.common import (
     create_keyword_extraction_agent,
     create_date_extraction_agent,
     build_context,
-    document_from_point,
-    get_qdrant_store,
     search_for_basic,
     search_for_others,
     merge_dicts,
 )
 
-SYSTEM_PROMPT = {
-    "basic_agent": BASIC_SYSTEM_PROMPT,
-    "trend_agent": TREND_SYSTEM_PROMPT,
-    "statistics_agent": BASIC_SYSTEM_PROMPT,
-    "classification_agent": CLASSIFICATION_SYSTEM_PROMPT,
-}
 
 
-class StateSchema(TypedDict):
-    query_original: str
-    query_retrieval: str
+
+class StateSchema(t.TypedDict):
+    original_query: str
+    retrieval_query: str
     collection_name: str
     top_k: int
     score_threshold: float
@@ -54,22 +38,23 @@ class StateSchema(TypedDict):
     system_prompt: str
     agent: str
 
-    keyword_filter: Optional[KeywordFilter]
-    date_filter: Optional[DateFilter]
-    metadata_filter: Filter
+    keyword_filter: MetadataFilter
+    date_filter: MetadataFilter
+    qdrant_filter: Filter
     retrieved_docs: list[Document]
     final_docs: list[Document]
 
-    messages: Annotated[list[AnyMessage], add_messages]
+    messages: t.Annotated[list[AnyMessage], add_messages]
 
 
-class InputSchema(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
+class InputSchema(t.TypedDict):
+    messages: t.Annotated[list[AnyMessage], add_messages]
 
 
-class OutputSchema(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
-    documents: Annotated[dict[str, Document], merge_dicts]
+class OutputSchema(t.TypedDict):
+    messages: t.Annotated[list[AnyMessage], add_messages]
+    documents: t.Annotated[dict[str, Document], merge_dicts]
+    context: list[Document]
 
 
 def prepare_thread(state: InputSchema) -> dict:
@@ -77,16 +62,21 @@ def prepare_thread(state: InputSchema) -> dict:
     router_agent = create_router_agent()
     query = state["messages"][-1].content
 
+    retrieval_query = complement_extraction_agent.invoke(query)
+    print(f"Query: {query}")
+    print(f"Query for retrieval: {retrieval_query}")
+
     agent = router_agent.invoke(query)
     print(f"Routed to agent: {agent}")
+
     updated = dict(
-        query_original=query,
-        query_retrieval=complement_extraction_agent.invoke(query),
+        original_query=query,
+        retrieval_query=retrieval_query,
         collection_name="lessons_learned",
         top_k=20 if agent == "basic_agent" else 1000,
         score_threshold=0.3 if agent == "basic_agent" else 0.1,
         use_reranking=agent == "basic_agent",
-        system_prompt=SYSTEM_PROMPT.get(agent, BASIC_SYSTEM_PROMPT),
+        system_prompt=SYSTEM_PROMPT.get(agent, SYSTEM_PROMPT["default"]),
         agent=agent,
     )
 
@@ -106,11 +96,12 @@ def prepare_thread(state: InputSchema) -> dict:
 
 def should_retrieve(
     state: StateSchema,
-) -> Literal["extract_keyword", "extract_date", "answer_directly"]:
-    retrieval_decision_agent = create_retrieval_decision_agent()
+) -> t.Literal["extract_keyword", "extract_date", "answer_directly"]:
+    # retrieval_decision_agent = create_retrieval_decision_agent()
 
-    should_retrieve = retrieval_decision_agent.invoke(state["messages"][-1].content)
-    print(f"Should retrieve: {should_retrieve}")
+    # should_retrieve = retrieval_decision_agent.invoke(state["messages"][-1].content)
+    # print(f"Should retrieve: {should_retrieve}")
+    should_retrieve = True
     if should_retrieve:
         return ["extract_keyword", "extract_date"]
     else:
@@ -120,9 +111,9 @@ def should_retrieve(
 def extract_keyword(state: StateSchema) -> dict:
     try:
         keyword_extraction_agent = create_keyword_extraction_agent()
-        result = keyword_extraction_agent.invoke(state["query_original"])
+        result = keyword_extraction_agent.invoke(state["original_query"])
         print(f"Extracted keyword: {result}")
-        keyword_filter = KeywordFilter(must=[result])
+        keyword_filter = MetadataFilter(must=[result])
     except Exception as e:
         print(str(e))
         keyword_filter = None
@@ -135,9 +126,9 @@ def extract_keyword(state: StateSchema) -> dict:
 def extract_date(state: StateSchema) -> dict:
     try:
         date_extraction_agent = create_date_extraction_agent()
-        result = date_extraction_agent.invoke(state["query_original"])
+        result = date_extraction_agent.invoke(state["original_query"])
         print(f"Extracted date: {result}")
-        date_filter = DateFilter(must=[result])
+        date_filter = MetadataFilter(must=[result])
     except Exception as e:
         print(str(e))
         date_filter = None
@@ -148,38 +139,39 @@ def extract_date(state: StateSchema) -> dict:
 
 
 def build_metadata_filter(state: StateSchema) -> dict:
-    if state["date_filter"] and state["keyword_filter"]:
-        metadata_filter = MetadataFilter[Union[ExtractionKeyword, ExtractionDate]](
-            must=state["keyword_filter"].must + state["date_filter"].must
-        )
-    elif state["date_filter"]:
-        metadata_filter = state["date_filter"]
-    elif state["keyword_filter"]:
-        metadata_filter = state["keyword_filter"]
-    else:
-        metadata_filter = None
+    try:
+        if state["date_filter"] and state["keyword_filter"]:
+            qdrant_filter = state["keyword_filter"] + state["date_filter"]
+        elif state["date_filter"]:
+            qdrant_filter = state["date_filter"]
+        elif state["keyword_filter"]:
+            qdrant_filter = state["keyword_filter"]
+        else:
+            qdrant_filter = None
+    except Exception as e:
+        print(str(e))
+        qdrant_filter = None
 
-    metadata_filter = build_qdrant_filter(metadata_filter)
+    qdrant_filter = build_qdrant_filter(qdrant_filter)
+    print(f"Built qdrant filter: {qdrant_filter}")
 
-    updated = dict(metadata_filter=metadata_filter)
+    updated = dict(qdrant_filter=qdrant_filter)
 
     return updated
 
 
 def retrieve_with_hybrid_search(state: StateSchema) -> dict:
-    print(f"Query for retrieval: {state['query_retrieval']}")
-
     if state["agent"] == "basic_agent":
         results = search_for_basic(
-            query=state["query_retrieval"],
-            metadata_filter=state["metadata_filter"],
+            query=state["retrieval_query"],
+            filter=state["qdrant_filter"],
             collection_name=state["collection_name"],
             top_k=state["top_k"],
             score_threshold=state["score_threshold"],
         )
     else:
         results = search_for_others(
-            metadata_filter=state["metadata_filter"],
+            filter=state["qdrant_filter"],
             collection_name=state["collection_name"],
             top_k=state["top_k"],
         )
@@ -204,7 +196,7 @@ def rerank_docs(state: StateSchema) -> dict:
         reranker = create_reranker()
         results = reranker.compress_documents_with_score(
             documents=retrieved_docs,
-            query=state["query_retrieval"],
+            query=state["retrieval_query"],
         )
 
         print("-" * 10 + " Reranked Results " + "-" * 10)
@@ -251,6 +243,7 @@ def answer(state: StateSchema) -> dict:
     updated = dict(
         messages=[response["messages"][-1]],
         documents=documents,
+        context=state["final_docs"],
     )
 
     return updated

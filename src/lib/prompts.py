@@ -321,3 +321,11 @@ ONLY returns an answer, without reasoning.
 
 STEP-BY-STEP REASONING:
 """.strip()
+
+SYSTEM_PROMPT = dict(
+    basic_agent=BASIC_SYSTEM_PROMPT,
+    trend_agent=TREND_SYSTEM_PROMPT,
+    statistics_agent=STATISTICS_SYSTEM_PROMPT,
+    classification_agent=CLASSIFICATION_SYSTEM_PROMPT,
+    default=BASIC_SYSTEM_PROMPT,
+)

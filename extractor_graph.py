@@ -55,20 +55,6 @@ class LessonLearnedModel(Base):
         return f"<LessonLearnedModel(id={self.id}, source={self.source}, doc_type={self.doc_type}, project_name={self.project_name}, occurred_at={self.occurred_at})>"
 
 
-class QuestionModel(Base):
-    __tablename__ = "questions"
-
-    id = Column(String, primary_key=True)
-    page_content = Column(Text, nullable=False)
-    lesson_learned_id = Column(String)
-    project_name = Column(String)
-    occurred_at = Column(String)
-    chunk_type = Column(String)
-
-    def __repr__(self):
-        return f"<QuestionModel(id={self.id}, lesson_learned_id={self.lesson_learned_id}, project_name={self.project_name}, occurred_at={self.occurred_at}, chunk_type={self.chunk_type})>"
-
-
 def setup_logging():
     formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
@@ -212,49 +198,10 @@ def create_lessons_learned_collection(
     return qdrant_store
 
 
-def create_questions_collection(
-    collection_name: str = "questions",
-) -> QdrantVectorStore:
-    qdrant_store = get_qdrant_store(collection_name)
-    qdrant_store.client.create_payload_index(
-        collection_name=collection_name,
-        field_name="learned_lesson_id",
-        field_schema=UuidIndexParams(
-            type=PayloadSchemaType.UUID,
-            on_disk=False,
-            enable_hnsw=False,
-        ),
-    )
-    qdrant_store.client.create_payload_index(
-        collection_name=collection_name,
-        field_name="project_name",
-        field_schema=KeywordIndexParams(
-            type=PayloadSchemaType.KEYWORD,
-            on_disk=False,
-            enable_hnsw=False,
-        ),
-    )
-    qdrant_store.client.create_payload_index(
-        collection_name=collection_name,
-        field_name="occurred_at",
-        field_schema=DatetimeIndexParams(
-            type=PayloadSchemaType.DATETIME,
-            on_disk=False,
-            enable_hnsw=False,
-        ),
-    )
-
-    return qdrant_store
-
-
 def save_to_qdrant(
-    documents: list[MyDocument],
-    questions: list[MyDocument],
-    lessons_learned_store: QdrantVectorStore,
-    questions_store: QdrantVectorStore,
+    documents: list[MyDocument], lessons_learned_store: QdrantVectorStore
 ) -> None:
     lessons_learned_store.add_documents(documents)
-    questions_store.add_documents(questions)
 
 
 def _save_lessons_learned_to_sqlite(
@@ -309,61 +256,8 @@ def _save_lessons_learned_to_sqlite(
         session.close()
 
 
-def _save_questions_to_sqlite(documents: list[MyDocument], session: Session) -> None:
-    logger.info(
-        json.dumps(
-            {
-                "event": inspect.currentframe().f_code.co_name,
-                "message": f"Saving {len(documents)} questions to SQLite database",
-            },
-            ensure_ascii=False,
-        )
-    )
-
-    try:
-        saved_count = 0
-        for doc in documents:
-            metadata = doc.metadata if hasattr(doc, "metadata") else {}
-
-            content = (
-                doc.page_content
-                if hasattr(doc, "page_content")
-                else getattr(doc, "text", "")
-            )
-
-            doc_model = QuestionModel(
-                id=doc.id,
-                page_content=content,
-                lesson_learned_id=metadata.get("lesson_learned_id", ""),
-                project_name=metadata.get("project_name", ""),
-                occurred_at=metadata.get("occurred_at"),
-                chunk_type=metadata.get("chunk_type", ""),
-            )
-
-            # Merge để tránh duplicate nếu id đã tồn tại
-            session.merge(doc_model)
-            saved_count += 1
-
-            # Commit theo batch để tăng hiệu suất
-            if saved_count % 100 == 0:
-                session.commit()
-                logger.info(f"Committed {saved_count}/{len(documents)} questions")
-
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        logger.error(f"Error saving questions to SQLite: {e}")
-    finally:
-        session.close()
-
-
-def save_to_sqlite(
-    documents: list[MyDocument],
-    questions: list[MyDocument],
-    session: Session,
-) -> None:
+def save_to_sqlite(documents: list[MyDocument], session: Session) -> None:
     _save_lessons_learned_to_sqlite(documents, session)
-    _save_questions_to_sqlite(questions, session)
 
 
 def save_to_markdown(documents: list[MyDocument], output_dir: str) -> None:
@@ -436,36 +330,27 @@ def main(data_dir: Path, storage_type: str, markdown_dir: str):
     parser = LessonsLearnedParser(data_dir)
 
     lessons_learned_store = create_lessons_learned_collection()
-    questions_store = create_questions_collection()
     session = create_session_maker()
 
-    # documents = list(chain.from_iterable(parser()))
     total_docs = 0
-    total_questions = 0
     try:
-        for docs, questions in parser():
+        for docs in parser():
             if storage_type in ["qdrant", "both", "all"]:
                 save_to_qdrant(
-                    documents=docs,
-                    questions=questions,
-                    lessons_learned_store=lessons_learned_store,
-                    questions_store=questions_store,
+                    documents=docs, lessons_learned_store=lessons_learned_store
                 )
 
             if storage_type in ["sqlite", "both", "all"]:
-                save_to_sqlite(documents=docs, questions=questions, session=session)
+                save_to_sqlite(documents=docs, session=session)
 
             # if storage_type in ["markdown", "all"]:
             #     save_to_markdown(documents, markdown_dir)
 
             total_docs += len(docs)
-            total_questions += len(questions)
     finally:
         lessons_learned_store.client.close()
-        questions_store.client.close()
 
     logger.info(f"{total_docs} documents have been processed!")
-    logger.info(f"{total_questions} questions have been processed!")
 
 
 if __name__ == "__main__":
