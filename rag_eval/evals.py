@@ -3,12 +3,6 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 from ragas import evaluate, EvaluationDataset
-from ragas.metrics import (
-    Faithfulness,
-    AnswerRelevancy,
-    ContextPrecision,
-    ContextRecall,
-)
 from ragas.llms import LangchainLLMWrapper, BaseRagasLLM
 from ragas.embeddings import LangchainEmbeddingsWrapper, BaseRagasEmbeddings
 from ragas.evaluation import EvaluationResult
@@ -18,6 +12,7 @@ from ragas.testset.transforms import apply_transforms
 
 # Add the current directory to the path so we can import rag module when run as a script
 sys.path.insert(0, str(Path(__file__).parent))
+from metrics import faithfulness, answer_relevancy, context_precision, context_recall
 from transformers import my_transformers
 from testset import build_testset
 from rag import (
@@ -25,21 +20,8 @@ from rag import (
     rag_pipeline,
     embeddings,
     llm,
-    vectorstore,
-    collection_name,
-) # noqa: E402
-
-
-def get_docs():
-    points = vectorstore.client.query_points(collection_name, limit=1000).points
-    docs = [
-        Document(
-            point.payload.get("page_content", ""),
-            metadata=point.payload.get("metadata") or {},
-        )
-        for point in points
-    ]
-    return docs
+    get_docs,
+)  # noqa: E402
 
 
 def build_kg(
@@ -51,7 +33,7 @@ def build_kg(
 ) -> KnowledgeGraph:
 
     if load_from_disk:
-        return KnowledgeGraph.load(save_path)
+        return KnowledgeGraph.load(Path("results", save_path))
 
     docs = get_docs()
     print(f"Loaded {len(docs)} documents from vector store.")
@@ -84,6 +66,7 @@ def evaluate_ragas(
     run_config: RunConfig,
     use_executor: bool = False,
     max_concurrent: int = 5,
+    load_from_disk: bool = False,
     save_csv_path: str = "evaluation_results.csv",
 ) -> EvaluationResult:
     """
@@ -102,32 +85,38 @@ def evaluate_ragas(
     Returns:
         Evaluation results
     """
-
-    inputs = [{"question": row.user_input} for row in testset]
-
-    if use_executor:
-        results = rag_pipeline.batch_invoke_with_executor(
-            inputs,
-            max_workers=max_concurrent,
-            show_progress=True,
+    if load_from_disk:
+        testset = EvaluationDataset.from_jsonl(
+            Path("results", "testset_with_responses.jsonl")
         )
     else:
-        results = rag_pipeline.batch_invoke(inputs, max_concurrent=max_concurrent)
+        inputs = [{"question": row.user_input} for row in testset]
 
-    for row, answer in zip(testset, results):
-        response: str = answer.get("response") or ""
-        context: list[Document] = answer.get("context") or []
-        retrieved_contexts = [doc.page_content for doc in context]
-        row.response = response
-        row.retrieved_contexts = retrieved_contexts
+        if use_executor:
+            results = rag_pipeline.batch_invoke_with_executor(
+                inputs,
+                max_workers=max_concurrent,
+                show_progress=True,
+            )
+        else:
+            results = rag_pipeline.batch_invoke(inputs, max_concurrent=max_concurrent)
+
+        for row, answer in zip(testset, results):
+            response: str = answer.get("response") or ""
+            context: list[Document] = answer.get("context") or []
+            retrieved_contexts = [doc.page_content for doc in context]
+            row.response = response
+            row.retrieved_contexts = retrieved_contexts
+
+        testset.to_jsonl(Path("results", "testset_with_responses.jsonl"))
 
     results = evaluate(
         testset,
         metrics=[
-            Faithfulness(),
-            AnswerRelevancy(),
-            ContextPrecision(),
-            ContextRecall(),
+            faithfulness(),
+            answer_relevancy(),
+            context_precision(),
+            context_recall(),
         ],
         llm=llm,
         embeddings=embedding_model,
@@ -145,17 +134,24 @@ async def main():
     transformer_llm = LangchainLLMWrapper(llm, run_config)
     embedding_model = LangchainEmbeddingsWrapper(embeddings, run_config)
 
-    kg = build_kg(transformer_llm, embedding_model, run_config, load_from_disk=False)
+    kg = build_kg(transformer_llm, embedding_model, run_config, load_from_disk=True)
     print("Knowledge Graph:", kg)
 
     ragas_testset = build_testset(
-        testset_size=10, llm=transformer_llm, embedding_model=embedding_model, kg=kg
+        testset_size=100,
+        llm=transformer_llm,
+        embedding_model=embedding_model,
+        kg=kg,
+        load_from_disk=True,
     )
-    print("Query:", ragas_testset[0].user_input)
-    print("Reference:", ragas_testset[0].reference)
 
     results = evaluate_ragas(
-        rag_pipeline, ragas_testset, transformer_llm, embedding_model, run_config
+        rag_pipeline,
+        ragas_testset,
+        transformer_llm,
+        embedding_model,
+        run_config,
+        load_from_disk=True,
     )
     print("Experiment results:", results)
 

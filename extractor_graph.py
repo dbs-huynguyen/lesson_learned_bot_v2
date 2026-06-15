@@ -166,7 +166,6 @@ def create_session_maker() -> Session:
     engine = create_engine(f"sqlite:///{os.getenv("SQLITE_DB_NAME")}", echo=False)
     # Xóa tất cả bảng cũ trước khi tạo lại
     LessonLearnedModel.__table__.drop(engine, checkfirst=True)
-    QuestionModel.__table__.drop(engine, checkfirst=True)
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     return Session()

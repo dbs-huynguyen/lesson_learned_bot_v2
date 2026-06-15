@@ -1,7 +1,8 @@
+import json
 import typing as t
 
 from pydantic import BaseModel
-from ragas.prompt import PydanticPrompt, StringIO
+from ragas.prompt import PydanticPrompt
 from ragas.llms import BaseRagasLLM
 from ragas.embeddings import BaseRagasEmbeddings
 from ragas.utils import num_tokens_from_string
@@ -9,86 +10,22 @@ from ragas.testset.graph import Node
 from ragas.testset.transforms import Transforms, Parallel
 from ragas.testset.transforms.filters import CustomNodeFilter
 from ragas.testset.transforms.extractors import EmbeddingExtractor, SummaryExtractor
-from ragas.testset.transforms.extractors.llm_based import NERExtractor, ThemesExtractor
+from ragas.testset.transforms.extractors.llm_based import NERExtractor
 from ragas.testset.transforms.relationship_builders import (
     CosineSimilarityBuilder,
     OverlapScoreBuilder,
 )
 
 
-class TextWithExtractionLimit(BaseModel):
+class StringIO(BaseModel):
     text: str
-    max_num: int = 10
 
-
-class NEROutput(BaseModel):
-    entities: t.List[str]
-
-
-class NERPrompt(PydanticPrompt[TextWithExtractionLimit, NEROutput]):
-    instruction: str = (
-        "Trích xuất các thực thể được đặt tên từ văn bản đã cho, giới hạn kết quả chỉ ở những thực thể hàng đầu. "
-        "Đảm bảo số lượng thực thể không vượt quá số lượng tối đa được chỉ định."
-    )
-    input_model: t.Type[TextWithExtractionLimit] = TextWithExtractionLimit
-    output_model: t.Type[NEROutput] = NEROutput
-    examples: t.List[t.Tuple[TextWithExtractionLimit, NEROutput]] = [
-        (
-            TextWithExtractionLimit(
-                text=(
-                    "Khi triển khai kiểm tra hoạt động của module CARECONNE có thay đổi xử lý dùng chung: bước kiểm tra hoạt động của datacenter. "
-                    "Hiệu chỉnh này đã thiếu sót xử lý ở kết quả trả về ở module HN, gây vấn đề Alive Monitoring gửi email thông báo lỗi ở HN mặc dù thực tế không có lỗi xảy ra."
-                ),
-                max_num=5,
-            ),
-            NEROutput(
-                entities=[
-                    "module CARECONNE",
-                    "datacenter",
-                    "module HN",
-                    "Alive Monitoring",
-                    "email thông báo lỗi",
-                ]
-            ),
-        ),
-    ]
-
-
-class ThemesAndConcepts(BaseModel):
-    output: t.List[str]
-
-
-class ThemesAndConceptsExtractorPrompt(
-    PydanticPrompt[TextWithExtractionLimit, ThemesAndConcepts]
-):
-    instruction: str = "Trích xuất các chủ đề và khái niệm chính từ văn bản đã cho."
-    input_model: t.Type[TextWithExtractionLimit] = TextWithExtractionLimit
-    output_model: t.Type[ThemesAndConcepts] = ThemesAndConcepts
-    examples: t.List[t.Tuple[TextWithExtractionLimit, ThemesAndConcepts]] = [
-        (
-            TextWithExtractionLimit(
-                text=(
-                    "Khi triển khai kiểm tra hoạt động của module CARECONNE có thay đổi xử lý dùng chung: bước kiểm tra hoạt động của datacenter. "
-                    "Hiệu chỉnh này đã thiếu sót xử lý ở kết quả trả về ở module HN, gây vấn đề Alive Monitoring gửi email thông báo lỗi ở HN mặc dù thực tế không có lỗi xảy ra."
-                ),
-                max_num=5,
-            ),
-            ThemesAndConcepts(
-                output=[
-                    "kiểm tra hoạt động",
-                    "module CARECONNE",
-                    "datacenter",
-                    "module HN",
-                    "Alive Monitoring",
-                    "email thông báo lỗi",
-                ]
-            ),
-        )
-    ]
+    def __hash__(self):
+        return hash(self.text)
 
 
 class SummaryExtractorPrompt(PydanticPrompt[StringIO, StringIO]):
-    instruction: str = "Tóm tắt đoạn văn đã cho trong vòng chưa đến 10 câu."
+    instruction: str = "Summarize the given text in less than 10 sentences. Always use the same language as the input text for the summary."
     input_model: t.Type[StringIO] = StringIO
     output_model: t.Type[StringIO] = StringIO
     examples: t.List[t.Tuple[StringIO, StringIO]] = [
@@ -108,6 +45,65 @@ class SummaryExtractorPrompt(PydanticPrompt[StringIO, StringIO]):
             ),
         )
     ]
+
+    def _generate_output_signature(self, indent: int = 4) -> str:
+        return (
+            f"Please return the output in a JSON format that complies with the "
+            f"following schema as specified in JSON Schema:\n"
+            f"{json.dumps(self.output_model.model_json_schema())}\n"
+            "Do not use single quotes in your response but double quotes,"
+            "properly escaped with a backslash."
+        )
+
+
+class TextWithExtractionLimit(BaseModel):
+    text: str
+    max_num: int = 10
+
+
+class NEROutput(BaseModel):
+    entities: t.List[str]
+
+
+class NERPrompt(PydanticPrompt[TextWithExtractionLimit, NEROutput]):
+    instruction: str = (
+        "Extract the named entities from the given text, limiting the output to the top entities. "
+        "Ensure the number of entities does not exceed the specified maximum.\n"
+        "Do not extract time entities."
+    )
+    input_model: t.Type[TextWithExtractionLimit] = TextWithExtractionLimit
+    output_model: t.Type[NEROutput] = NEROutput
+    examples: t.List[t.Tuple[TextWithExtractionLimit, NEROutput]] = [
+        (
+            TextWithExtractionLimit(
+                text=(
+                    "Elon Musk, the CEO of Tesla and SpaceX, announced plans to expand operations to new locations in Europe and Asia. "
+                    "This expansion is expected to create thousands of jobs, particularly in cities like Berlin and Shanghai."
+                ),
+                max_num=10,
+            ),
+            NEROutput(
+                entities=[
+                    "Elon Musk",
+                    "Tesla",
+                    "SpaceX",
+                    "Europe",
+                    "Asia",
+                    "Berlin",
+                    "Shanghai",
+                ]
+            ),
+        )
+    ]
+
+    def _generate_output_signature(self, indent: int = 4) -> str:
+        return (
+            f"Please return the output in a JSON format that complies with the "
+            f"following schema as specified in JSON Schema:\n"
+            f"{json.dumps(self.output_model.model_json_schema())}\n"
+            "Do not use single quotes in your response but double quotes,"
+            "properly escaped with a backslash."
+        )
 
 
 def my_transformers(
@@ -134,7 +130,6 @@ def my_transformers(
         llm=llm,
         property_name="entities",
         prompt=NERPrompt(),
-        max_num_entities=5,
     )
     cosine_sim_builder = CosineSimilarityBuilder(
         property_name="summary_embedding",
@@ -147,18 +142,12 @@ def my_transformers(
         property_name="entities",
         new_property_name="overlap_score",
     )
-    theme_extractor = ThemesExtractor(
-        llm=llm,
-        property_name="themes",
-        prompt=ThemesAndConceptsExtractorPrompt(),
-        max_num_themes=5,
-    )
 
     transforms = [
         summary_extractor,
         node_filter,
         Parallel(summary_emb_extractor, ner_extractor),
-        Parallel(cosine_sim_builder, ner_overlap_sim, theme_extractor),
+        Parallel(cosine_sim_builder, ner_overlap_sim),
     ]
 
     return transforms

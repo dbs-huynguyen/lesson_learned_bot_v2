@@ -55,7 +55,7 @@ QUERY:
 
 GROUPS:
 - name: 'trend_agent', keywords: ['xu hướng']
-- name: 'classification_agent', keywords: ['phân loại', 'nhóm']
+- name: 'classification_agent', keywords: ['phân loại']
 - name: 'statistics_agent', keywords: ['thống kê', 'phổ biến', 'tần suất', 'số lượng', 'so sánh']
 - name: 'basic_agent', keywords: []
 

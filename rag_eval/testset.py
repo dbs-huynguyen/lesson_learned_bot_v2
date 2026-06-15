@@ -1,3 +1,4 @@
+import json
 import typing as t
 from enum import Enum
 from pathlib import Path
@@ -36,24 +37,23 @@ class QueryLength(str, Enum):
 
 class QueryStyle(str, Enum):
     """
-    Enumeration of query styles. Available options are: PERFECT_GRAMMAR, POOR_GRAMMAR, WEB_SEARCH_LIKE
+    Enumeration of query styles. Available options are: PERFECT_GRAMMAR, WEB_SEARCH_LIKE
     """
 
     PERFECT_GRAMMAR = "Perfect grammar"
-    POOR_GRAMMAR = "Poor grammar"
     WEB_SEARCH_LIKE = "Web search like queries"
 
 
-class SingleHopQueryAnswerGenerationPrompt(
-    PydanticPrompt[QueryCondition, SingleHopGeneratedQueryAnswer]
-):
+class SingleHopQueryAnswerGenerationPrompt(PydanticPrompt[QueryCondition, SingleHopGeneratedQueryAnswer]):
     instruction: str = (
-        "Tạo một truy vấn và câu trả lời một bước dựa trên các điều kiện đã chỉ định (persona, term, style, length) và ngữ cảnh được cung cấp. "
-        "Đảm bảo câu trả lời hoàn toàn phù hợp với ngữ cảnh, chỉ sử dụng thông tin trực tiếp từ ngữ cảnh được cung cấp.\n"
-        "### Hướng dẫn:\n"
-        "1. **Tạo Truy vấn**: Dựa trên ngữ cảnh, persona, term, style và length, hãy tạo một câu hỏi phù hợp với quan điểm của persona và kết hợp term.\n"
-        "2. **Tạo Câu trả lời**: Chỉ sử dụng nội dung từ ngữ cảnh được cung cấp, hãy xây dựng một câu trả lời chi tiết cho truy vấn. "
-        "Không thêm bất kỳ thông tin nào không có trong hoặc không thể suy ra từ ngữ cảnh.\n"
+        "Generate a single-hop query and answer based on the specified conditions (persona, term, style, length) "
+        "and the provided context. Ensure the answer is entirely faithful to the context, using only the information "
+        "directly from the provided context. Always use the same language as the provided context for the query and answer.\n"
+        "### Instructions:\n"
+        "1. **Generate a Query**: Based on the context, persona, term, style, and length, create a question "
+        "that aligns with the persona's perspective and incorporates the term.\n"
+        "2. **Generate an Answer**: Using only the content from the provided context, construct a detailed answer "
+        "to the query. Do not add any information not included in or inferable from the context.\n"
     )
     input_model: t.Type[QueryCondition] = QueryCondition
     output_model: t.Type[SingleHopGeneratedQueryAnswer] = SingleHopGeneratedQueryAnswer
@@ -62,30 +62,35 @@ class SingleHopQueryAnswerGenerationPrompt(
             QueryCondition(
                 persona=Persona(
                     name="Software Engineer",
-                    role_description="Tập trung vào các thực hành tốt nhất về lập trình và thiết kế hệ thống.",
+                    role_description="Focuses on coding best practices and system design.",
                 ),
-                term="Bài học kinh nghiệm",
-                query_style="ngữ pháp hoàn hảo",
-                query_length="ngắn",
+                term="microservices",
+                query_style="PERFECT_GRAMMAR",
+                query_length="MEDIUM",
                 context=(
-                    "Khi triển khai kiểm tra hoạt động của module CARECONNE có thay đổi xử lý dùng chung: bước kiểm tra hoạt động của datacenter. "
-                    "Hiệu chỉnh này đã thiếu sót xử lý ở kết quả trả về ở module HN, gây vấn đề Alive Monitoring gửi email thông báo lỗi ở HN mặc dù thực tế không có lỗi xảy ra."
+                    "Microservices are an architectural style where applications are structured as a collection of loosely coupled services. "
+                    "Each service is fine-grained and focuses on a single functionality."
                 ),
             ),
             SingleHopGeneratedQueryAnswer(
-                query="Nguyên nhân là gì dẫn đến việc Alive Monitoring gửi email thông báo lỗi đến HN?",
-                answer="Nguyên nhân là do hiệu chỉnh trong module CARECONNE đã thiếu sót xử lý ở kết quả trả về ở module HN, dẫn đến việc Alive Monitoring gửi email thông báo lỗi mặc dù thực tế không có lỗi xảy ra.",
+                query="What is the purpose of microservices in software architecture?",
+                answer="Microservices are designed to structure applications as a collection of loosely coupled services, each focusing on a single functionality.",
             ),
         ),
     ]
 
+    def _generate_output_signature(self, indent: int = 4) -> str:
+        return (
+            f"Please return the output in a JSON format that complies with the "
+            f"following schema as specified in JSON Schema:\n"
+            f"{json.dumps(self.output_model.model_json_schema())}\n"
+            "Do not use single quotes in your response but double quotes,"
+            "properly escaped with a backslash."
+        )
+
 
 class SingleHopIncidentQuerySynthesizer(SingleHopSpecificQuerySynthesizer):
-
     name: str = "single_hop_specific_query_synthes"
-    generate_query_reference_prompt: PydanticPrompt = (
-        SingleHopQueryAnswerGenerationPrompt()
-    )
 
     def prepare_combinations(
         self,
@@ -114,17 +119,19 @@ class MultiHopQueryAnswerGenerationPrompt(
     PydanticPrompt[QueryConditions, MultiHopGeneratedQueryAnswer]
 ):
     instruction: str = (
-        "Tạo truy vấn và câu trả lời đa bước dựa trên các điều kiện đã xác định (persona, themes, style, length) và ngữ cảnh được cung cấp. "
-        "Các chủ đề (themes) đại diện cho một tập hợp các cụm từ được trích xuất hoặc tạo ra từ ngữ cảnh, làm nổi bật tính phù hợp của ngữ cảnh đã chọn để tạo truy vấn đa bước. "
-        "Đảm bảo truy vấn tích hợp rõ ràng các chủ đề này.\n"
-        "### Hướng dẫn:\n"
-        "1. **Tạo truy vấn đa bước**: Sử dụng các phân đoạn ngữ cảnh và chủ đề được cung cấp để tạo một truy vấn yêu cầu kết hợp thông tin từ nhiều phân đoạn (ví dụ: `<1-hop>` và `<2-hop>`). "
-        "Đảm bảo truy vấn kết hợp rõ ràng một hoặc nhiều chủ đề và phản ánh sự liên quan của chúng đến ngữ cảnh.\n"
-        "2. **Tạo câu trả lời**: Chỉ sử dụng nội dung từ ngữ cảnh được cung cấp để tạo câu trả lời chi tiết và chính xác cho truy vấn. "
-        "Tránh thêm thông tin không có trực tiếp hoặc không thể suy ra từ ngữ cảnh đã cho.\n"
-        "3. **Thẻ ngữ cảnh đa bước**:\n"
-        "  - Mỗi phân đoạn ngữ cảnh được gắn thẻ là `<1-hop>`, `<2-hop>`, v.v.\n"
-        "  - Đảm bảo truy vấn sử dụng thông tin từ ít nhất hai phân đoạn và kết nối chúng một cách có ý nghĩa.\n"
+        "Generate a multi-hop query and answer based on the specified conditions (persona, themes, style, length) "
+        "and the provided context. The themes represent a set of phrases either extracted or generated from the "
+        "context, which highlight the suitability of the selected context for multi-hop query creation. Ensure the query "
+        "explicitly incorporates these themes. Always use the same language as the provided context for the query and answer.\n"
+        "### Instructions:\n"
+        "1. **Generate a Multi-Hop Query**: Use the provided context segments and themes to form a query that requires combining "
+        "information from multiple segments (e.g., `<1-hop>` and `<2-hop>`). Ensure the query explicitly incorporates one or more "
+        "themes and reflects their relevance to the context.\n"
+        "2. **Generate an Answer**: Use only the content from the provided context to create a detailed and faithful answer to "
+        "the query  Avoid adding information that is not directly present or inferable from the given context.\n"
+        "3. **Multi-Hop Context Tags**:\n"
+        "   - Each context segment is tagged as `<1-hop>`, `<2-hop>`, etc.\n"
+        "   - Ensure the query uses information from at least two segments and connects them meaningfully.\n"
     )
     input_model: t.Type[QueryConditions] = QueryConditions
     output_model: t.Type[MultiHopGeneratedQueryAnswer] = MultiHopGeneratedQueryAnswer
@@ -132,45 +139,38 @@ class MultiHopQueryAnswerGenerationPrompt(
         (
             QueryConditions(
                 persona=Persona(
-                    name="Software Engineer",
-                    role_description="Tập trung vào các thực hành tốt nhất về lập trình và thiết kế hệ thống.",
+                    name="Historian",
+                    role_description="Focuses on major scientific milestones and their global impact.",
                 ),
-                themes=[
-                    "Sự cố hệ thống",
-                    "Lỗi logic code",
-                    "Giải pháp khắc phục",
-                    "Bài học kinh nghiệm",
-                ],
-                query_style="ngữ pháp hoàn hảo",
-                query_length="vừa",
+                themes=["Theory of Relativity", "Experimental Validation"],
+                query_style="PERFECT_GRAMMAR",
+                query_length="MEDIUM",
                 context=[
-                    (
-                        "<1-hop> Mô tả sự cố: "
-                        "Module CARECONNE triển khai thay đổi xử lý kiểm tra hoạt động datacenter nhưng thiếu sót xử lý kết quả trả về ở module HN, dẫn đến việc Alive Monitoring gửi email thông báo lỗi mặc dù thực tế không có sự cố."
-                    ),
-                    (
-                        "<2-hop> Biện pháp khắc phục: "
-                        "Liên lạc khách hàng và tắt cài đặt lịch kiểm tra hoạt động các module định kỳ ở môi trường STAGE; "
-                        "Hiệu chỉnh mã nguồn, kiểm tra ở môi trường phát triển và gửi báo cáo kết quả kiểm tra đến khách hàng xác nhận; "
-                        "Phát hành lại môi trường STAGE và mở lại cài đặt lịch kiểm tra hoạt động các module định kỳ ở môi trường STAGE;"
-                    ),
+                    "<1-hop> Albert Einstein developed the theory of relativity, introducing the concept of spacetime.",
+                    "<2-hop> The bending of light by gravity was confirmed during the 1919 solar eclipse, supporting Einstein’s theory.",
                 ],
             ),
             MultiHopGeneratedQueryAnswer(
-                query="Nguyên nhân dẫn đến việc Alive Monitoring gửi email thông báo lỗi đến HN và biện pháp khắc phục là gì?",
+                query="How was the experimental validation of the theory of relativity achieved during the 1919 solar eclipse?",
                 answer=(
-                    "Nguyên nhân là do module CARECONNE triển khai thay đổi xử lý kiểm tra hoạt động datacenter nhưng thiếu sót xử lý kết quả trả về ở module HN, dẫn đến việc Alive Monitoring gửi email thông báo lỗi mặc dù thực tế không có sự cố. "
-                    "Biện pháp khắc phục bao gồm: liên lạc khách hàng và tắt cài đặt lịch kiểm tra hoạt động các module định kỳ ở môi trường STAGE; "
-                    "hiệu chỉnh mã nguồn, kiểm tra ở môi trường phát triển và gửi báo cáo kết quả kiểm tra đến khách hàng xác nhận; "
-                    "phát hành lại môi trường STAGE và mở lại cài đặt lịch kiểm tra hoạt động các module định kỳ ở môi trường STAGE."
+                    "The experimental validation of the theory of relativity was achieved during the 1919 solar eclipse by confirming "
+                    "the bending of light by gravity, which supported Einstein’s concept of spacetime as proposed in the theory."
                 ),
             ),
         ),
     ]
 
+    def _generate_output_signature(self, indent: int = 4) -> str:
+        return (
+            f"Please return the output in a JSON format that complies with the "
+            f"following schema as specified in JSON Schema:\n"
+            f"{json.dumps(self.output_model.model_json_schema())}\n"
+            "Do not use single quotes in your response but double quotes,"
+            "properly escaped with a backslash."
+        )
+
 
 class MultiHopIncidentQuerySynthesizer(MultiHopSpecificQuerySynthesizer):
-
     name: str = "multi_hop_specific_query_synthes"
     generate_query_reference_prompt: PydanticPrompt = (
         MultiHopQueryAnswerGenerationPrompt()
@@ -226,7 +226,7 @@ def build_testset(
 ) -> EvaluationDataset:
 
     if load_from_disk:
-        return EvaluationDataset.from_jsonl(save_jsonl_path)
+        return EvaluationDataset.from_jsonl(Path("results", save_jsonl_path))
 
     generator = TestsetGenerator(
         llm=llm,
@@ -241,8 +241,8 @@ def build_testset(
     )
 
     query_distribution = [
-        (SingleHopIncidentQuerySynthesizer(llm=llm), 0.5),
-        (MultiHopIncidentQuerySynthesizer(llm=llm), 0.5),
+        (SingleHopIncidentQuerySynthesizer(llm=llm, generate_query_reference_prompt=SingleHopQueryAnswerGenerationPrompt()), 0.5),
+        (MultiHopIncidentQuerySynthesizer(llm=llm, generate_query_reference_prompt=MultiHopQueryAnswerGenerationPrompt()), 0.5),
     ]
     testset = generator.generate(testset_size=testset_size, query_distribution=query_distribution)
     ragas_testset = testset.to_evaluation_dataset()
