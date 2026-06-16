@@ -26,8 +26,6 @@ from src.agent.common import (
 )
 
 
-
-
 class StateSchema(t.TypedDict):
     original_query: str
     retrieval_query: str
@@ -73,9 +71,9 @@ def prepare_thread(state: InputSchema) -> dict:
         original_query=query,
         retrieval_query=retrieval_query,
         collection_name="lessons_learned",
-        top_k=20 if agent == "basic_agent" else 1000,
-        score_threshold=0.3 if agent == "basic_agent" else 0.1,
-        use_reranking=agent == "basic_agent",
+        top_k=1000 if agent == "trend_agent" else 20,
+        score_threshold=0.1 if agent == "trend_agent" else 0.3,
+        use_reranking=agent != "trend_agent",
         system_prompt=SYSTEM_PROMPT.get(agent, SYSTEM_PROMPT["default"]),
         agent=agent,
     )
@@ -161,19 +159,19 @@ def build_metadata_filter(state: StateSchema) -> dict:
 
 
 def retrieve_with_hybrid_search(state: StateSchema) -> dict:
-    if state["agent"] == "basic_agent":
+    if state["agent"] == "trend_agent":
+        results = search_for_others(
+            filter=state["qdrant_filter"],
+            collection_name=state["collection_name"],
+            top_k=state["top_k"],
+        )
+    else:
         results = search_for_basic(
             query=state["retrieval_query"],
             filter=state["qdrant_filter"],
             collection_name=state["collection_name"],
             top_k=state["top_k"],
             score_threshold=state["score_threshold"],
-        )
-    else:
-        results = search_for_others(
-            filter=state["qdrant_filter"],
-            collection_name=state["collection_name"],
-            top_k=state["top_k"],
         )
 
     writer = get_stream_writer()

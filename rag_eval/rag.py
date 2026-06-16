@@ -1,3 +1,8 @@
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+
 import asyncio
 import typing as t
 from tqdm.auto import tqdm
@@ -9,23 +14,41 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_community.embeddings import InfinityEmbeddings
 from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from qdrant_client import QdrantClient
 from langchain_qdrant import QdrantVectorStore, RetrievalMode, FastEmbedSparse
+from langchain_core.rate_limiters import InMemoryRateLimiter
+
+
+rate_limiter = InMemoryRateLimiter(
+    requests_per_second=1,
+    check_every_n_seconds=0.1,
+    max_bucket_size=10,
+)
+
 
 embeddings = InfinityEmbeddings(
     model="AITeamVN/Vietnamese_Embedding",
     infinity_api_url="http://192.168.88.179:2025",
 )
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    max_retries=5,
+    rate_limiter=rate_limiter,
+)
 
-llm = ChatOllama(
-    model="gemma4:12b",
+base_ollama_kwargs = dict(
+    model="qwen3.5:9b",
     base_url="http://192.168.88.179:11435",
     keep_alive=-1,
     seed=9999,
     num_ctx=32768,
     reasoning=False,
-    temperature=0,
 )
+# llm = ChatOllama(
+#     **base_ollama_kwargs,
+#     temperature=0,
+# )
 collection_name = "lessons_learned"
 vectorstore = QdrantVectorStore(
     client=QdrantClient(url="http://192.168.88.179:6333"),

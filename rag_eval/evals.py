@@ -58,33 +58,13 @@ def build_kg(
     return kg
 
 
-def evaluate_ragas(
+def build_testset_with_responses(
     rag_pipeline: RAGAgent,
     testset: EvaluationDataset,
-    llm: BaseRagasLLM,
-    embedding_model: BaseRagasEmbeddings,
-    run_config: RunConfig,
     use_executor: bool = False,
     max_concurrent: int = 5,
     load_from_disk: bool = False,
-    save_csv_path: str = "evaluation_results.csv",
-) -> EvaluationResult:
-    """
-    Evaluate RAG pipeline using ragas metrics.
-
-    Args:
-        rag_pipeline: RAG pipeline instance
-        testset: Evaluation dataset
-        llm: LLM for evaluation
-        embedding_model: Embedding model for evaluation
-        run_config: Run configuration
-        save_csv_path: Path to save results CSV
-        use_executor: If True, use ragas Executor for progress tracking (default: False)
-        max_concurrent: Maximum concurrent requests (default: 5)
-
-    Returns:
-        Evaluation results
-    """
+) -> EvaluationDataset:
     if load_from_disk:
         testset = EvaluationDataset.from_jsonl(
             Path("results", "testset_with_responses.jsonl")
@@ -110,16 +90,25 @@ def evaluate_ragas(
 
         testset.to_jsonl(Path("results", "testset_with_responses.jsonl"))
 
+    return testset
+
+def evaluate_ragas(
+    testset: EvaluationDataset,
+    llm: BaseRagasLLM,
+    embedding_model: BaseRagasEmbeddings,
+    run_config: RunConfig,
+    save_csv_path: str = "evaluation_results.csv",
+) -> EvaluationResult:
     results = evaluate(
         testset,
         metrics=[
-            faithfulness(),
-            answer_relevancy(),
-            context_precision(),
-            context_recall(),
+            faithfulness(llm=llm),
+            answer_relevancy(llm=llm, embeddings=embedding_model),
+            context_precision(llm=llm),
+            context_recall(llm=llm),
         ],
-        llm=llm,
-        embeddings=embedding_model,
+        # llm=llm,
+        # embeddings=embedding_model,
         run_config=run_config,
         raise_exceptions=True,
     )
@@ -145,13 +134,17 @@ async def main():
         load_from_disk=True,
     )
 
-    results = evaluate_ragas(
+    ragas_testset_with_responses = build_testset_with_responses(
         rag_pipeline,
         ragas_testset,
+        load_from_disk=True,
+    )
+
+    results = evaluate_ragas(
+        ragas_testset_with_responses,
         transformer_llm,
         embedding_model,
         run_config,
-        load_from_disk=True,
     )
     print("Experiment results:", results)
 

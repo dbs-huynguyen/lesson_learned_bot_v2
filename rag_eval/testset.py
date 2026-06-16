@@ -1,10 +1,8 @@
-import json
 import typing as t
 from enum import Enum
 from pathlib import Path
 
 from ragas import EvaluationDataset
-from ragas.prompt import PydanticPrompt
 from ragas.testset import TestsetGenerator
 from ragas.llms import BaseRagasLLM
 from ragas.embeddings import BaseRagasEmbeddings
@@ -24,6 +22,8 @@ from ragas.testset.synthesizers.multi_hop.prompts import (
     QueryConditions,
     GeneratedQueryAnswer as MultiHopGeneratedQueryAnswer,
 )
+
+from metrics.base import PydanticPrompt
 
 
 class QueryLength(str, Enum):
@@ -48,7 +48,8 @@ class SingleHopQueryAnswerGenerationPrompt(PydanticPrompt[QueryCondition, Single
     instruction: str = (
         "Generate a single-hop query and answer based on the specified conditions (persona, term, style, length) "
         "and the provided context. Ensure the answer is entirely faithful to the context, using only the information "
-        "directly from the provided context. Always use the same language as the provided context for the query and answer.\n"
+        "directly from the provided context. Always use the Vietnamese language for the query and answer. "
+        "Do not include any time information in the query.\n"
         "### Instructions:\n"
         "1. **Generate a Query**: Based on the context, persona, term, style, and length, create a question "
         "that aligns with the persona's perspective and incorporates the term.\n"
@@ -79,19 +80,8 @@ class SingleHopQueryAnswerGenerationPrompt(PydanticPrompt[QueryCondition, Single
         ),
     ]
 
-    def _generate_output_signature(self, indent: int = 4) -> str:
-        return (
-            f"Please return the output in a JSON format that complies with the "
-            f"following schema as specified in JSON Schema:\n"
-            f"{json.dumps(self.output_model.model_json_schema())}\n"
-            "Do not use single quotes in your response but double quotes,"
-            "properly escaped with a backslash."
-        )
-
 
 class SingleHopIncidentQuerySynthesizer(SingleHopSpecificQuerySynthesizer):
-    name: str = "single_hop_specific_query_synthes"
-
     def prepare_combinations(
         self,
         node: Node,
@@ -122,16 +112,17 @@ class MultiHopQueryAnswerGenerationPrompt(
         "Generate a multi-hop query and answer based on the specified conditions (persona, themes, style, length) "
         "and the provided context. The themes represent a set of phrases either extracted or generated from the "
         "context, which highlight the suitability of the selected context for multi-hop query creation. Ensure the query "
-        "explicitly incorporates these themes. Always use the same language as the provided context for the query and answer.\n"
+        "explicitly incorporates these themes. Always use the Vietnamese language for the query and answer. "
+        "Do not include any time information in the query.\n"
         "### Instructions:\n"
         "1. **Generate a Multi-Hop Query**: Use the provided context segments and themes to form a query that requires combining "
         "information from multiple segments (e.g., `<1-hop>` and `<2-hop>`). Ensure the query explicitly incorporates one or more "
         "themes and reflects their relevance to the context.\n"
         "2. **Generate an Answer**: Use only the content from the provided context to create a detailed and faithful answer to "
-        "the query  Avoid adding information that is not directly present or inferable from the given context.\n"
+        "the query. Avoid adding information that is not directly present or inferable from the given context.\n"
         "3. **Multi-Hop Context Tags**:\n"
-        "   - Each context segment is tagged as `<1-hop>`, `<2-hop>`, etc.\n"
-        "   - Ensure the query uses information from at least two segments and connects them meaningfully.\n"
+        "  - Each context segment is tagged as `<1-hop>`, `<2-hop>`, etc.\n"
+        "  - Ensure the query uses information from at least two segments and connects them meaningfully.\n"
     )
     input_model: t.Type[QueryConditions] = QueryConditions
     output_model: t.Type[MultiHopGeneratedQueryAnswer] = MultiHopGeneratedQueryAnswer
@@ -160,22 +151,8 @@ class MultiHopQueryAnswerGenerationPrompt(
         ),
     ]
 
-    def _generate_output_signature(self, indent: int = 4) -> str:
-        return (
-            f"Please return the output in a JSON format that complies with the "
-            f"following schema as specified in JSON Schema:\n"
-            f"{json.dumps(self.output_model.model_json_schema())}\n"
-            "Do not use single quotes in your response but double quotes,"
-            "properly escaped with a backslash."
-        )
-
 
 class MultiHopIncidentQuerySynthesizer(MultiHopSpecificQuerySynthesizer):
-    name: str = "multi_hop_specific_query_synthes"
-    generate_query_reference_prompt: PydanticPrompt = (
-        MultiHopQueryAnswerGenerationPrompt()
-    )
-
     def prepare_combinations(
         self,
         nodes,
@@ -241,8 +218,20 @@ def build_testset(
     )
 
     query_distribution = [
-        (SingleHopIncidentQuerySynthesizer(llm=llm, generate_query_reference_prompt=SingleHopQueryAnswerGenerationPrompt()), 0.5),
-        (MultiHopIncidentQuerySynthesizer(llm=llm, generate_query_reference_prompt=MultiHopQueryAnswerGenerationPrompt()), 0.5),
+        (
+            SingleHopIncidentQuerySynthesizer(
+                llm=llm,
+                generate_query_reference_prompt=SingleHopQueryAnswerGenerationPrompt(),
+            ),
+            0.7,
+        ),
+        (
+            MultiHopIncidentQuerySynthesizer(
+                llm=llm,
+                generate_query_reference_prompt=MultiHopQueryAnswerGenerationPrompt(),
+            ),
+            0.3,
+        ),
     ]
     testset = generator.generate(testset_size=testset_size, query_distribution=query_distribution)
     ragas_testset = testset.to_evaluation_dataset()
