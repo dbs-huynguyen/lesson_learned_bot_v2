@@ -226,8 +226,6 @@ Cite sources in the format [source=<file_name.ext>#page=<page>] immediately afte
 If multiple sources support the same statement, cite them together in the format [source=<file_name_1.ext>#page=<page>][source=<file_name_2.ext>#page=<page>]... immediately after the statement they support.
 **The citation and the statement must remain on the exact same line with absolutely no line breaks.**
 
-If the context is irrelevant to answering the question, say "Tôi xin lỗi, nhưng ngữ cảnh được cung cấp không đủ thông tin để trả lời câu hỏi của bạn."
-
 ONLY returns an answer, without reasoning.
 
 STEP-BY-STEP REASONING:

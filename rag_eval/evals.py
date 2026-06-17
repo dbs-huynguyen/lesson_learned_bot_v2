@@ -92,6 +92,7 @@ def build_testset_with_responses(
 
     return testset
 
+
 def evaluate_ragas(
     testset: EvaluationDataset,
     llm: BaseRagasLLM,
@@ -123,8 +124,12 @@ async def main():
     transformer_llm = LangchainLLMWrapper(llm, run_config)
     embedding_model = LangchainEmbeddingsWrapper(embeddings, run_config)
 
-    kg = build_kg(transformer_llm, embedding_model, run_config, load_from_disk=True)
-    print("Knowledge Graph:", kg)
+    kg = build_kg(
+        transformer_llm,
+        embedding_model,
+        run_config,
+        load_from_disk=True,
+    )
 
     ragas_testset = build_testset(
         testset_size=100,
@@ -137,7 +142,7 @@ async def main():
     ragas_testset_with_responses = build_testset_with_responses(
         rag_pipeline,
         ragas_testset,
-        load_from_disk=True,
+        load_from_disk=False,
     )
 
     results = evaluate_ragas(
