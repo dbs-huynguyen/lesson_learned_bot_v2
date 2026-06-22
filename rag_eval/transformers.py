@@ -69,7 +69,7 @@ class NERPrompt(PydanticPrompt[TextWithExtractionLimit, NEROutput]):
     instruction: str = (
         "Extract the named entities from the given text, limiting the output to the top entities. "
         "Ensure the number of entities does not exceed the specified maximum.\n"
-        "Do not extract time entities."
+        "Do not extract time and task-code entities."
     )
     input_model: t.Type[TextWithExtractionLimit] = TextWithExtractionLimit
     output_model: t.Type[NEROutput] = NEROutput

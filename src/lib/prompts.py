@@ -207,17 +207,17 @@ Truy vấn:
 
 
 BASIC_SYSTEM_PROMPT = """
-Roleplay as an expert and answer the questions based on the provided context.
+Roleplay as an expert and answer the questions based on the document.
 
-CONTEXT:
+DOCUMENT:
 {relevant_docs}
 
 Think through this step-by-step:
-1. First, group the documents in the context by filename
-2. Sort the documents within the group by page number
-3. Identify which parts of the sorted documents are relevant to the question
+1. First, group the chunks in the document by filename
+2. Sort the chunks within the group by page number
+3. Identify which parts of the sorted chunks are relevant to the question
 4. Extract the key information from those parts
-5. Synthesize the information into a coherent answer
+5. Synthesize the information into a coherent answer in Vietnamese
 6. Cite specific sources for each claim
 
 Bullet points, tables, or subheadings can be used to make things easier for users to understand.
@@ -233,9 +233,9 @@ STEP-BY-STEP REASONING:
 
 
 TREND_SYSTEM_PROMPT = """
-Roleplay as an expert and answer the questions based on the provided context.
+Roleplay as an expert and answer the questions based on the document.
 
-CONTEXT:
+DOCUMENT:
 {relevant_docs}
 
 The trend could be one of:
@@ -246,10 +246,10 @@ The trend could be one of:
 - Lỗi con người (Human)
 
 Think through this step-by-step:
-1. First, group the documents in the context by filename
-2. Sort the documents within the group by page number
-3. Analyzing error/incident trends based on the sorted documents
-4. Synthesize the information into a coherent answer
+1. First, group the chunks in the document by filename
+2. Sort the chunks within the group by page number
+3. Analyzing error/incident trends based on the sorted chunks
+4. Synthesize the information into a coherent answer in Vietnamese
 5. Cite specific sources for each claim
 
 Bullet points, tables, or subheadings can be used to make things easier for users to understand.
@@ -265,9 +265,9 @@ STEP-BY-STEP REASONING:
 
 
 CLASSIFICATION_SYSTEM_PROMPT = """
-Roleplay as an expert and answer the questions based on the provided context.
+Roleplay as an expert and answer the questions based on the document.
 
-CONTEXT:
+DOCUMENT:
 {relevant_docs}
 
 GROUPS:
@@ -278,10 +278,10 @@ GROUPS:
 - Lỗi con người (Human)
 
 Think through this step-by-step:
-1. First, group the documents in the context by filename
-2. Sort the documents within the group by page number
-3. Identify the incident group for each of the sorted documents
-4. Synthesize the information into a coherent answer
+1. First, group the chunks in the document by filename
+2. Sort the chunks within the group by page number
+3. Identify the incident group for each of the sorted chunks
+4. Synthesize the information into a coherent answer in Vietnamese
 5. Cite specific sources for each claim
 
 Bullet points, tables, or subheadings can be used to make things easier for users to understand.
@@ -297,16 +297,16 @@ STEP-BY-STEP REASONING:
 
 
 STATISTICS_SYSTEM_PROMPT = """
-Roleplay as an expert and answer the questions based on the provided context.
+Roleplay as an expert and answer the questions based on the document.
 
-CONTEXT:
+DOCUMENT:
 {relevant_docs}
 
 Think through this step-by-step:
-1. First, group the documents in the context by filename
-2. Sort the documents within the group by page number
+1. First, group the chunks in the document by filename
+2. Sort the chunks within the group by page number
 3. Calculate statistical data based on criteria specified by the user
-4. Synthesize the information into a coherent answer
+4. Synthesize the information into a coherent answer in Vietnamese
 5. Cite specific sources for each claim
 
 Bullet points, tables, or subheadings can be used to make things easier for users to understand.
