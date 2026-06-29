@@ -1,4 +1,5 @@
 import typing as t
+from pathlib import Path
 from operator import itemgetter
 
 from qdrant_client.models import Filter
@@ -24,6 +25,7 @@ from src.agent.common import (
     search_for_others,
     merge_dicts,
 )
+from src.lib.utils import log_chat
 
 
 class StateSchema(t.TypedDict):
@@ -43,6 +45,8 @@ class StateSchema(t.TypedDict):
     final_docs: list[Document]
 
     messages: t.Annotated[list[AnyMessage], add_messages]
+
+    log_file: str
 
 
 class InputSchema(t.TypedDict):
@@ -88,6 +92,10 @@ def prepare_thread(state: InputSchema) -> dict:
             message=f"Truy vấn là ***{agent.replace('_agent', ' query').lower()}***.",
         )
     )
+
+    LOG_FILE = Path("logs/chat_logs.jsonl")
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    updated["log_file"] = LOG_FILE
 
     return updated
 
@@ -244,6 +252,13 @@ def answer(state: StateSchema) -> dict:
         context=state["final_docs"],
     )
 
+    log_chat(
+        state["log_file"],
+        question=state["original_query"],
+        answer=response["messages"][-1].content,
+        retrieval_docs=state["final_docs"],
+    )
+
     return updated
 
 
@@ -258,6 +273,8 @@ def answer_directly(state: StateSchema) -> dict:
     )
 
     updated = dict(messages=[ai])
+
+    log_chat(state["log_file"], question=state["original_query"], answer=ai.content)
 
     return updated
 
