@@ -103,11 +103,11 @@ def prepare_thread(state: InputSchema) -> dict:
 def should_retrieve(
     state: StateSchema,
 ) -> t.Literal["extract_keyword", "extract_date", "answer_directly"]:
-    # retrieval_decision_agent = create_retrieval_decision_agent()
+    retrieval_decision_agent = create_retrieval_decision_agent()
 
-    # should_retrieve = retrieval_decision_agent.invoke(state["messages"][-1].content)
-    # print(f"Should retrieve: {should_retrieve}")
-    should_retrieve = True
+    should_retrieve = retrieval_decision_agent.invoke(state["messages"][-1].content)
+    print(f"Should retrieve: {should_retrieve}")
+    # should_retrieve = True
     if should_retrieve:
         return ["extract_keyword", "extract_date"]
     else:
@@ -232,8 +232,8 @@ def rerank_docs(state: StateSchema) -> dict:
 
 def answer(state: StateSchema) -> dict:
     relevant_docs = build_context(state["final_docs"])
-    # print("-" * 10 + " Context " + "-" * 10)
-    # print(relevant_docs)
+    print("-" * 10 + " Context " + "-" * 10)
+    print(relevant_docs)
     documents = {
         f"{doc.metadata.get('source', '')}#page={doc.metadata.get('page_number', '')}": doc
         for doc in state["final_docs"]

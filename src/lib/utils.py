@@ -34,11 +34,15 @@ def log_chat(
     answer: str,
     retrieval_docs: list[Document] | None = None,
 ):
-    retrieval_docs = [doc.page_content for doc in retrieval_docs]
+    if retrieval_docs:
+        retrieval_docs = [doc.page_content for doc in retrieval_docs]
+    else:
+        retrieval_docs = []
+
     record = {
         "question": question,
         "answer": answer,
-        "retrieval_docs": retrieval_docs or [],
+        "retrieval_docs": retrieval_docs,
     }
 
     with log_file.open("a", encoding="utf-8") as f:
