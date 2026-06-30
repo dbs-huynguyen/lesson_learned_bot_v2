@@ -1,7 +1,9 @@
 import re
+import pytz
 import json
 import typing as t
 from pathlib import Path
+from datetime import datetime
 
 import dateparser
 from langchain_core.documents import Document
@@ -43,6 +45,7 @@ def log_chat(
         "question": question,
         "answer": answer,
         "retrieval_docs": retrieval_docs,
+        "timestamp": datetime.now(pytz.timezone("Asia/Ho_Chi_Minh")).isoformat(),
     }
 
     with log_file.open("a", encoding="utf-8") as f:
