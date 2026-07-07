@@ -310,7 +310,7 @@ if st.session_state.is_streaming:
 
 # ── Chat input ────────────────────────────────────────────────────────────────
 prompt = st.chat_input(
-    "Nhắn tin cho ChatGPT...", disabled=st.session_state.is_streaming
+    "Nhắn tin cho ChatDBS...", disabled=st.session_state.is_streaming
 )
 
 if prompt and not st.session_state.is_streaming:
